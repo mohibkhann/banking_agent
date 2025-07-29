@@ -1,0 +1,1 @@
+transaction_id,date,client_id,card_id,card_type,card_brand,amount,merchant_id,merchant_city,merchant_state,zip,mcc_number,use_chip,credit_limit,acct_open_date,card_on_dark_web,current_age,gender,per_capita_income,yearly_income,total_debt,credit_score,num_credit_cards,day_name,is_weekend,mcc_original,mcc_category,month,txn_time,txn_hour,txn_date,is_night_txn,txn_count_per_day
