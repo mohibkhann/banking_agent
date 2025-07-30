@@ -4,7 +4,7 @@
 import pandas as pd
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
-from data_store.data_store import DataStore
+from banking_agent.data_store.data_store import DataStore
 from langchain_core.tools import tool
 
 # Utility to parse date strings
@@ -137,7 +137,7 @@ def get_spending_by_category(
     top_n: int = 10
 ) -> Dict[str, Any]:
     """
-    Breakdown of spending by MCC category over a date range.
+    Breakdown of spending by MCC (Merchant Category Code) category over a date range.
     """
     start = _parse_date(start_date)
     end = _parse_date(end_date)
