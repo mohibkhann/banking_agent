@@ -458,3 +458,42 @@ if __name__ == "__main__":
 
 
 
+ERROR I am enountering while running this code:
+
+
+python -m banking_agent.agents.spendings_agent
+(agentenv) PS C:\Users\mohib.alikhan\Desktop\Banking-Agent> python -m banking_agent.agents.spendings_agent
+This is our secotttnd try
+Loading data from: C:/Users/mohib.alikhan/Desktop/Banking-Agent/Banking_Data.csv
+
+Available tools:
+C:\Users\mohib.alikhan\Desktop\Banking-Agent\banking_agent\agents\spendings_agent.py:412: PydanticDeprecatedSince20: The `schema` method is deprecated; use `model_json_schema`
+ instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.11/migration/                                      "args_schema": tool.args_schema.schema() if hasattr(tool, 'args_schema') else None
+- get_spending_summary: Calculate spending metrics for a client between two dates (inclusive). (args: {'description': 'Calculate spending metrics for a client between two date
+s (inclusive).', 'properties': {'client_id': {'title': 'Client Id', 'type': 'integer'}, 'start_date': {'title': 'Start Date', 'type': 'string'}, 'end_date': {'title': 'End Date', 'type': 'string'}}, 'required': ['client_id', 'start_date', 'end_date'], 'title': 'get_spending_summary', 'type': 'object'})                                               - get_spending_by_category: Breakdown of spending by MCC (Merchant Category Code) category over a date range. (args: {'description': 'Breakdown of spending by MCC (Merchant Ca
+tegory Code) category over a date range.', 'properties': {'client_id': {'title': 'Client Id', 'type': 'integer'}, 'start_date': {'title': 'Start Date', 'type': 'string'}, 'end_date': {'title': 'End Date', 'type': 'string'}, 'top_n': {'default': 10, 'title': 'Top N', 'type': 'integer'}}, 'required': ['client_id', 'start_date', 'end_date'], 'title': 'get_spending_by_category', 'type': 'object'})                                                                                                                                 - get_spending_by_category_date: Time series of category spending: amount per day per MCC category. (args: {'description': 'Time series of category spending: amount per day pe
+r MCC category.', 'properties': {'client_id': {'title': 'Client Id', 'type': 'integer'}, 'start_date': {'title': 'Start Date', 'type': 'string'}, 'end_date': {'title': 'End Date', 'type': 'string'}}, 'required': ['client_id', 'start_date', 'end_date'], 'title': 'get_spending_by_category_date', 'type': 'object'})                                     - get_spending_by_night: Analyze spending that occurred during night hours vs day hours.
+night_start and night_end are hours in 24h format. (args: {'description': 'Analyze spending that occurred during night hours vs day hours.\nnight_start and night_end are hours
+ in 24h format.', 'properties': {'client_id': {'title': 'Client Id', 'type': 'integer'}, 'start_date': {'title': 'Start Date', 'type': 'string'}, 'end_date': {'title': 'End Date', 'type': 'string'}, 'night_start': {'default': 22, 'title': 'Night Start', 'type': 'integer'}, 'night_end': {'default': 6, 'title': 'Night End', 'type': 'integer'}}, 'required': ['client_id', 'start_date', 'end_date'], 'title': 'get_spending_by_night', 'type': 'object'})                                                                           - analyze_time_patterns: Analyze client spending patterns across different time dimensions.
+
+Args:
+    client_id: The client identifier
+
+Returns:
+    Dictionary with time-based spending pattern analysis (args: {'description': 'Analyze client spending patterns across different time dimensions.\n\nArgs:\n    client_id: Th
+e client identifier\n\nReturns:\n    Dictionary with time-based spending pattern analysis', 'properties': {'client_id': {'title': 'Client Id', 'type': 'integer'}}, 'required': ['client_id'], 'title': 'analyze_time_patterns', 'type': 'object'})                                                                                                           
+=== Query: 'How much did I spend last month?' for client 430 ===
+📤 Calling LLM with prompt
+Response:
+I encountered an error processing your request: 'NoneType' object has no attribute 'get'
+Full result object:
+{
+  "client_id": "430",
+  "query": "How much did I spend last month?",
+  "response": "I encountered an error processing your request: 'NoneType' object has no attribute 'get'",
+  "error": "'NoneType' object has no attribute 'get'",
+  "timestamp": "2025-07-31T12:44:25.918202"
+}
+
+============================================================
+Can you help me diagnose this error
