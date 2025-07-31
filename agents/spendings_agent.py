@@ -41,12 +41,11 @@ class SpendingAgentState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
     error: Optional[str]
     execution_path: List[str]
-# LANGGRAPH AGENT IMPLEMENTATION
 
 class SpendingAgent:
     """LangGraph-based Spending Agent using @tool decorators"""
     
-    def __init__(self, banking_data_path: str, model_name: str = "gpt-4", memory: bool = True):
+    def __init__(self, banking_data_path: str, model_name: str = "gpt-4o", memory: bool = True):
         # Initialize data store
         self.data_store = DataStore()
         self.data_store.load_data(banking_data_path)
@@ -111,161 +110,110 @@ class SpendingAgent:
     def _intent_classifier_node(self, state: SpendingAgentState) -> SpendingAgentState:
         """Classify user intent and select appropriate tools via structured JSON from the LLM."""
         # 1) Build the classification prompt
-        classification_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a domain expert at translating natural-language spending queries into precise tool invocations. Follow this workflow:
 
-        1. **Interpret Intent**  
-        - Identify if the user wants summary, time-series, category breakdown, night/day comparison, or multiple analyses.
+        classification_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", 
+                "You are an AI assistant that helps classify user queries about spending analytics. "
+                "Based on the user's query, select the appropriate tool(s) to use and provide the necessary parameters in a JSON format.\n\n"
+                "Available tools:\n"
+                "1. get_spending_summary(client_id: int, start_date: str, end_date: str)\n"
+                "2. analyze_time_patterns(client_id: int)\n"
+                "3. get_spending_by_category(client_id: int, start_date: str, end_date: str, top_n: int = 10)\n"
+                "4. get_spending_by_category_date(client_id: int, start_date: str, end_date: str)\n"
+                "5. get_spending_by_night(client_id: int, start_date: str, end_date: str, night_start: int = 22, night_end: int = 6)\n\n"
+                "Always respond in this exact JSON structure:\n\n"
+                "{{\n"
+                "  \"tools_to_use\": [\"tool_name\"],\n"
+                "  \"tool_parameters\": {{\n"
+                "    \"tool_name\": {{\n"
+                "      \"client_id\": 123,\n"
+                "      \"start_date\": \"YYYY-MM-DD\",\n"
+                "      \"end_date\": \"YYYY-MM-DD\"\n"
+                "    }}\n"
+                "  }},\n"
+                "  \"execution_order\": [\"tool_name\"],\n"
+                "  \"query_type\": \"summary|time_patterns|category_breakdown|category_date|night_analysis\"\n"
+                "}}"
+                "Use only valid JSON syntax. Do not explain. Do not include markdown or code blocks. "
+                "Wrap everything inside a valid JSON object with double quotes."
+                ),
+                MessagesPlaceholder(variable_name="messages")
+            ]
+        )
+        messages = [
+            HumanMessage(content=state["user_query"])
+        ]
 
-        2. **Select Tools**  
-        Choose exactly from these functions:
+        # Format prompt and run chain
+        prompt_inputs = classification_prompt.invoke({"messages": messages})
 
-        1. **get_spending_summary(client_id: int, start_date: str, end_date: str)**  
-            • Returns date_range, total_spending, transaction_count, average_transaction, median_transaction, spending_days, daily_average, max_transaction, min_transaction
 
-        2. **analyze_time_patterns(client_id: int)**  
-            • Returns weekend_vs_weekday, daily_patterns, hourly_patterns, monthly_patterns, night_vs_day, behavioral_insights
 
-        3. **get_spending_by_category(client_id: int, start_date: str, end_date: str, top_n: int = 10)**  
-            • Returns date_range and category_breakdown
 
-        4. **get_spending_by_category_date(client_id: int, start_date: str, end_date: str)**  
-            • Returns date_series
-
-        5. **get_spending_by_night(client_id: int, start_date: str, end_date: str, night_start: int = 22, night_end: int = 6)**  
-            • Returns client_id, date_range, night_total, day_total, night_count, day_count, night_average, day_average
-
-        3. **Extract Parameters**  
-        - client_id (integer), dates in ISO YYYY-MM-DD, numeric settings: top_n, night_start, night_end
-
-        4. **Determine Order**  
-        - If multiple tools, list in logical execution order.
-
-        5. **Strict JSON Output**  
-        Respond **only** with:
-        ```json
-        {
-            "tools_to_use": ["tool_name", …],
-            "tool_parameters": {
-            "tool_name": { "param": value, … },
-            …
-            },
-            "execution_order": ["tool_name", …],
-            "query_type": "<summary|time_series|category_breakdown|night_analysis|multi_tool>",
-            "confidence": 0.## 
-        }
-                {
-        "tools_to_use": ["get_spending_summary"],
-        "tool_parameters": {
-            "get_spending_summary": {
-            "client_id": 123,
-            "start_date": "2025-07-01",
-            "end_date": "2025-07-15"
-            }
-        },
-        "execution_order": ["get_spending_summary"],
-        "query_type": "summary",
-        "confidence": 0.95
-        }
-        ```"""),
-                ("human", "User Query: {query}")
-            ])
-
-        # try:
-        #     # Debug: entering classifier
-        #     print("⏺️ [DEBUG] Running intent classifier for:", state['user_query'])
-            
-        #     # 1) Format prompt and call LLM
-        #     prompt_messages = classification_prompt.format_messages(query=state['user_query'])
-        #     print("[DEBUG] About to call llm.invoke()")
-        #     llm_resp = self.llm.invoke(prompt_messages)
-        #     print("[DEBUG] llm.invoke() succeeded")
-        #     print("[DEBUG] LLM response:\n", llm_resp.content)
-            
-        #     # 2) Parse JSON payload
-        #     payload = json.loads(llm_resp.content.strip())
-        #     tool_params = payload["tool_parameters"]
-
-        #     # 2a) Normalize any "start"/"end" keys to "start_date"/"end_date"
-        #     for name, args in tool_params.items():
-        #         if "start" in args and "end" in args:
-        #             args["start_date"] = args.pop("start")
-        #             args["end_date"]   = args.pop("end")
-            
-        #     tools_to_use    = payload["tools_to_use"]
-        #     execution_order = payload["execution_order"]
-        #     query_type      = payload["query_type"]
-        #     confidence      = float(payload.get("confidence", 0))
-
-        #     # 3) Populate state.intent
-        #     state['intent'] = {
-        #         "tools_to_use":     tools_to_use,
-        #         "tool_parameters":  tool_params,
-        #         "execution_order":  execution_order,
-        #         "query_type":       query_type,
-        #         "confidence":       confidence
-        #     }
-        #     state['execution_path'].append("intent_classifier")
-
-        #     # 4) Build tool_calls
-        #     tool_calls = []
-        #     for name in execution_order:
-        #         tool_calls.append({
-        #             "name": name,
-        #             "args": tool_params[name],
-        #             "id":   f"call_{name}_{len(state['messages'])}"
-        #         })
-
-        #     # 5) Enqueue AIMessage that routes to tools
-        #     state['messages'].append(AIMessage(
-        #         content="Routing your query to the appropriate analysis tools now.",
-        #         tool_calls=tool_calls
-        #     ))
-
-        # except json.JSONDecodeError:
-        #     state['error'] = (
-        #         "Failed to parse JSON from the intent classifier. "
-        #         "Please ensure the LLM response is valid JSON."
-        #     )
-        #     return state
-        # except Exception as e:
-        #     state['error'] = f"Intent classification error: {e}"
-        #     return state
-
-        # return state
         try:
-            print("📤 Calling LLM with prompt")
-            prompt_messages = classification_prompt.format_messages(query=state['user_query'])
-            llm_resp = self.llm.invoke(prompt_messages)
-
-            print("📥 Raw LLM response:", repr(llm_resp))
-            content = getattr(llm_resp, "content", "").strip()
-
-            if not content:
-                state['error'] = "LLM returned an empty or null response."
-                return state
+            # Debug: entering classifier
+            print("⏺️ [DEBUG] Running intent classifier for:", state['user_query'])
             
-            print("🧪 LLM Raw Output:", repr(llm_resp))
-            if llm_resp is None:
-                print("❌ LLM returned None!")
-            elif not hasattr(llm_resp, "content"):
-                print("❌ LLM response has no 'content' attribute:", type(llm_resp))
-            else:
-                print("✅ LLM content:", repr(llm_resp.content))
+            # 1) Format prompt and call LLM
+            print("[DEBUG] About to call llm.invoke()")
+            
+            llm_resp = self.llm.invoke(prompt_inputs)
+            print("[DEBUG] llm.invoke() succeeded")
+            print("[DEBUG] LLM response:\n", llm_resp.content)
+            
+            # 2) Parse JSON payload
+            payload = json.loads(llm_resp.content.strip())
+            tool_params = payload["tool_parameters"]
 
+            # 2a) Normalize any "start"/"end" keys to "start_date"/"end_date"
+            for name, args in tool_params.items():
+                if "start" in args and "end" in args:
+                    args["start_date"] = args.pop("start")
+                    args["end_date"]   = args.pop("end")
+            
+            tools_to_use    = payload["tools_to_use"]
+            execution_order = payload["execution_order"]
+            query_type      = payload["query_type"]
+            confidence      = float(payload.get("confidence", 0))
 
+            # 3) Populate state.intent
+            state['intent'] = {
+                "tools_to_use":     tools_to_use,
+                "tool_parameters":  tool_params,
+                "execution_order":  execution_order,
+                "query_type":       query_type,
+                "confidence":       confidence
+            }
+            state['execution_path'].append("intent_classifier")
 
-            payload = json.loads(content)
-            if not isinstance(payload, dict):
-                state['error'] = "LLM returned a response that isn't a valid JSON object."
-                return state
+            # 4) Build tool_calls
+            tool_calls = []
+            for name in execution_order:
+                tool_calls.append({
+                    "name": name,
+                    "args": tool_params[name],
+                    "id":   f"call_{name}_{len(state['messages'])}"
+                })
+
+            # 5) Enqueue AIMessage that routes to tools
+            state['messages'].append(AIMessage(
+                content="Routing your query to the appropriate analysis tools now.",
+                tool_calls=tool_calls
+            ))
 
         except json.JSONDecodeError:
-            state['error'] = "Invalid JSON format returned from LLM."
+            state['error'] = (
+                "Failed to parse JSON from the intent classifier. "
+                "Please ensure the LLM response is valid JSON."
+            )
             return state
         except Exception as e:
-            state['error'] = f"Unexpected error from intent classifier: {e}"
+            state['error'] = f"Intent classification error: {e}"
             return state
+
+        return state
+
 
 
 
@@ -448,7 +396,7 @@ class SpendingAgent:
                 print(f"Error processing query '{query}': {e}")
 
 if __name__ == "__main__":
-    print("This is our secotttnd try")
+    print("This is our 88 try")
     SpendingAgent('C:/Users/mohib.alikhan/Desktop/Banking-Agent/Banking_Data.csv').demo_spending_agent()
     print("\n" + "="*60)
 

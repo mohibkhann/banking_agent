@@ -20,13 +20,16 @@ def get_spending_summary( client_id: int, start_date: str, end_date: str) -> Dic
     """
     Calculate spending metrics for a client between two dates (inclusive).
     """
+
+    print("The get_spending_summary has been called")
     start = _parse_date(start_date)
     end = _parse_date(end_date)
     if start is None or end is None:
         return {"error": "Invalid date format. Use 'YYYY-MM-DD'."}
 
-    df = DataStore().get_client_data(client_id)
+    df = DataStore().get_client_data(430)
     if df.empty:
+        print("Data is empty")
         return {"error": f"No data for client {client_id}."}
 
     period = df[(df['date'] >= start) & (df['date'] <= end)]
