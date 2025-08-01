@@ -36,7 +36,7 @@ class SpendingAgentState(TypedDict):
     client_id: int
     user_query: str
     intent: Optional[Dict[str, Any]]
-    analysis_result: Optional[Dict[str, Any]]
+    analysis_result: Optional[List[Dict[str, Any]]]
     response: Optional[str]
     messages: Annotated[List[BaseMessage], operator.add]
     error: Optional[str]
@@ -48,6 +48,7 @@ class SpendingAgent:
     def __init__(self, banking_data_path: str, model_name: str = "gpt-4o", memory: bool = True):
         # Initialize data store
         self.data_store = DataStore()
+        print(f"The Banking Data path provided {banking_data_path}")
         self.data_store.load_data(banking_data_path)
         
         # Initialize LLM
@@ -62,15 +63,13 @@ class SpendingAgent:
             analyze_time_patterns
             
         ]
-        
-        # Create tool node
-        self.tool_node = ToolNode(self.tools)
-        
+
         # Setup memory (optional)
         self.memory = SqliteSaver.from_conn_string(":memory:") if memory else None
         
         # Build the graph
         self.graph = self._build_graph()
+        print(self.graph.get_graph().draw_mermaid())
     
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph workflow"""
@@ -79,7 +78,7 @@ class SpendingAgent:
 
         # the nodes in the graph
         workflow.add_node("intent_classifier",    self._intent_classifier_node)
-        workflow.add_node("tool_executor",        self.tool_node)
+        workflow.add_node("tool_executor",        self._custom_tool_executor)
         workflow.add_node("collector",            self._collect_tool_outputs)
         workflow.add_node("response_generator",   self._response_generator_node)
         workflow.add_node("error_handler",        self._error_handler_node)
@@ -97,13 +96,15 @@ class SpendingAgent:
             }
         )
 
-        # On successful tool execution → collect outputs → generate response
         workflow.add_edge("tool_executor",      "collector")
         workflow.add_edge("collector",          "response_generator")
-
-        #End points
         workflow.add_edge("response_generator", END)
         workflow.add_edge("error_handler",     END)
+
+        print("Let Print the Graph now")
+
+
+
 
         # Compile with optional checkpointing
         return workflow.compile(checkpointer=self.memory)
@@ -145,7 +146,6 @@ class SpendingAgent:
             HumanMessage(content=state["user_query"])
         ]
 
-        # Format prompt and run chain
         prompt_inputs = classification_prompt.invoke({"messages": messages})
 
 
@@ -155,18 +155,16 @@ class SpendingAgent:
             # Debug: entering classifier
             print("⏺️ [DEBUG] Running intent classifier for:", state['user_query'])
             
-            # 1) Format prompt and call LLM
             print("[DEBUG] About to call llm.invoke()")
-            
             llm_resp = self.llm.invoke(prompt_inputs)
             print("[DEBUG] llm.invoke() succeeded")
             print("[DEBUG] LLM response:\n", llm_resp.content)
             
-            # 2) Parse JSON payload
+            #  Parse JSON payload
             payload = json.loads(llm_resp.content.strip())
             tool_params = payload["tool_parameters"]
 
-            # 2a) Normalize any "start"/"end" keys to "start_date"/"end_date"
+            #  Normalize any "start"/"end" keys to "start_date"/"end_date"
             for name, args in tool_params.items():
                 if "start" in args and "end" in args:
                     args["start_date"] = args.pop("start")
@@ -213,21 +211,41 @@ class SpendingAgent:
             return state
 
         return state
+    
 
-
-
-
+    def _custom_tool_executor(self, state: SpendingAgentState) -> SpendingAgentState:
+        """Execute tools and store outputs as messages."""
+        try:
+            tool_outputs = []
+            for tool_name in state['intent']['execution_order']:
+                # Find the tool
+                tool_fn = next(t for t in self.tools if t.name == tool_name)
+                params = state['intent']['tool_parameters'][tool_name]
+        
+                result = tool_fn.invoke(params)
+                print(f"These are the results {result}")
+                
+                tool_outputs.append(result)
+                state['messages'].append(AIMessage(content=json.dumps(result),tool_calls=None))  # Store result
+            state['execution_path'].append("tool_executor")
+        except Exception as e:
+            state['error'] = f"Tool execution failed: {e}"
+        return state
 
     def _collect_tool_outputs(self, state: SpendingAgentState) -> SpendingAgentState:
         outputs = []
+        print("≈ current messages:", state['messages'])
         for msg in state['messages']:
-            if isinstance(msg, AIMessage) and msg.tool_calls is None:
-                try:
-                    obj = json.loads(msg.content)
-                    outputs.append(obj)
-                except:
-                    pass
+            if isinstance(msg, AIMessage):
+                tc = getattr(msg, "tool_calls", None)
+                # accept messages with no tool_calls or an empty list
+                if tc is None or tc == []:
+                    try:
+                        outputs.append(json.loads(msg.content))
+                    except json.JSONDecodeError:
+                        pass
         state['analysis_result'] = outputs
+        state['execution_path'].append("collector")
         return state
 
 
@@ -365,39 +383,74 @@ class SpendingAgent:
 
     def demo_spending_agent(self):
         """Demonstrate the Spending Agent capabilities with example calls"""
-        # Update this path to point to your banking CSV file
-        data_path = 'C:/Users/mohib.alikhan/Desktop/Banking-Agent/Banking_Data.csv'
-        print(f"Loading data from: {data_path}")
-        try:
-            agent = SpendingAgent(data_path, memory=False)
-        except Exception as e:
-            print(f"Error initializing agent: {e}")
-            return
+        # # Update this path to point to your banking CSV file
+        # data_path = 'C:/Users/mohib.alikhan/Desktop/Banking-Agent/Banking_Data.csv'
+        # print(f"Loading data from: {data_path}")
+        # try:
+        #     agent = SpendingAgent(data_path, memory=False)
+        # except Exception as e:
+        #     print(f"Error initializing agent: {e}")
+        #     return
 
-        # List available tools
-        print("\nAvailable tools:")
-        for tool in agent.get_available_tools():
-            print(f"- {tool['name']}: {tool.get('description', 'No description')} (args: {tool.get('args_schema')})")
+        # # List available tools
+        # print("\nAvailable tools:")
+        # for tool in agent.get_available_tools():
+        #     print(f"- {tool['name']}: {tool.get('description', 'No description')} (args: {tool.get('args_schema')})")
 
-        # Example queries
-        examples = [
-            ('430', 'How much did I spend last month?')
-        ]
+        # # Example queries
+        # examples = [
+        #     ('430', 'How much did I spend last month?')
+        # ]
 
-        for client_id, query in examples:
-            print(f"\n=== Query: '{query}' for client {client_id} ===")
-            try:
-                result = agent.process_query(client_id=client_id, user_query=query)
-                print("Response:")
-                print(result.get('response'))
-                print("Full result object:")
-                print(json.dumps(result, indent=2))
-            except Exception as e:
-                print(f"Error processing query '{query}': {e}")
+        # for client_id, query in examples:
+        #     print(f"\n=== Query: '{query}' for client {client_id} ===")
+        #     try:
+        #         result = agent.process_query(client_id=client_id, user_query=query)
+        #         print("Response:")
+        #         print(result.get('response'))
+        #         print("Full result object:")
+        #         print(json.dumps(result, indent=2))
+        #     except Exception as e:
+        #         print(f"Error processing query '{query}': {e}")
+        # 1) Create your agent
+
+
+
+
 
 if __name__ == "__main__":
-    print("This is our 88 try")
-    SpendingAgent('C:/Users/mohib.alikhan/Desktop/Banking-Agent/Banking_Data.csv').demo_spending_agent()
+    print("This is our 9010 try")
+    # SpendingAgent('C:/Users/mohib.alikhan/Desktop/Banking-Agent/Banking_Data.csv').demo_spending_agent()
+    agent = SpendingAgent("C:/Users/mohib.alikhan/Desktop/Banking-Agent/Banking_Data.csv", memory=False)
+
+    # 2) Build a fake state with intent already populated
+    state = {
+    "client_id":       430,
+    "user_query":      "ignored",
+    "intent": {
+        "execution_order":     ["get_spending_summary"],
+        "tool_parameters": {
+        "get_spending_summary": {
+            "client_id": 430,
+            "start_date": "2023-09-01",
+            "end_date":   "2023-09-30"
+        }
+        }
+    },
+    "messages":        [],      # executor will append directly here
+    "analysis_result": None,
+    "response":        None,
+    "error":           None,
+    "execution_path":  []
+    }
+
+    # 3) Run only your executor + collector
+    state = agent._custom_tool_executor(state)
+    state = agent._collect_tool_outputs(state)
+
+    # 4) Inspect
+    print("Execution path:", state["execution_path"])
+    print("Raw outputs:", state["analysis_result"])
     print("\n" + "="*60)
 
 

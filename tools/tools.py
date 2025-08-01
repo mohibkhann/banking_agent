@@ -23,6 +23,7 @@ def get_spending_summary( client_id: int, start_date: str, end_date: str) -> Dic
 
     print("The get_spending_summary has been called")
     start = _parse_date(start_date)
+    print(f"the parsed data {start} ")
     end = _parse_date(end_date)
     if start is None or end is None:
         return {"error": "Invalid date format. Use 'YYYY-MM-DD'."}
@@ -32,9 +33,13 @@ def get_spending_summary( client_id: int, start_date: str, end_date: str) -> Dic
         print("Data is empty")
         return {"error": f"No data for client {client_id}."}
 
-    period = df[(df['date'] >= start) & (df['date'] <= end)]
+    period = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+    
     if period.empty:
+        print("123")
         return {"error": f"No transactions for client {client_id} in {start_date} to {end_date}."}
+    
+    print("Have done analysis lets now print the results __+_+_+_)+_+_)+__)+)___)_+")
 
     total = float(period['amount'].sum())
     count = int(period.shape[0])
@@ -44,6 +49,10 @@ def get_spending_summary( client_id: int, start_date: str, end_date: str) -> Dic
     daily_avg = total / days
     mx = float(period['amount'].max())
     mn = float(period['amount'].min())
+
+    print(f" The Client's total: {total}")
+    print(f"The client's Count of transactions: {count}")
+    print(f"The client's average transactions: {avg}")
 
     return {
        
