@@ -1,461 +1,459 @@
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Any, Optional, TypedDict, Annotated
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import operator
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 load_dotenv()
-# LangChain imports
+
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
-from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI
 
-# LangGraph imports
-from langgraph.graph import StateGraph, END, START
-from langgraph.prebuilt import ToolNode
+from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-
-from banking_agent.data_store.data_store import DataStore
-from banking_agent.tools.tools import (
-    get_spending_by_category,
-    get_spending_by_category_date,
-    get_spending_by_night,
-    get_spending_summary,
-    analyze_time_patterns
-    
+from banking_agent.data_store.data_store import (
+    DataStore,
+    generate_sql_for_client_analysis,
+    generate_sql_for_benchmark_analysis,
+    execute_generated_sql
 )
 
+
 class SpendingAgentState(TypedDict):
-    """State for the Spending Agent workflow"""
+    """Enhanced state for SQL-first Spending Agent workflow"""
     client_id: int
     user_query: str
     intent: Optional[Dict[str, Any]]
-    analysis_result: Optional[List[Dict[str, Any]]]
+    sql_queries: Optional[List[Dict[str, Any]]]      
+    raw_data: Optional[List[Dict[str, Any]]]           # NEW: Raw SQL results
+    analysis_result: Optional[List[Dict[str, Any]]]    
     response: Optional[str]
     messages: Annotated[List[BaseMessage], operator.add]
     error: Optional[str]
     execution_path: List[str]
+    analysis_type: Optional[str]                       
+
 
 class SpendingAgent:
-    """LangGraph-based Spending Agent using @tool decorators"""
-    
-    def __init__(self, banking_data_path: str, model_name: str = "gpt-4o", memory: bool = True):
-        # Initialize data store
-        self.data_store = DataStore()
-        print(f"The Banking Data path provided {banking_data_path}")
-        self.data_store.load_data(banking_data_path)
-        
-        # Initialize LLM
+    """SQL-first LangGraph-based Spending Agent with benchmark capabilities"""
+
+    def __init__(
+        self,
+        client_csv_path: str,
+        overall_csv_path: str,
+        model_name: str = "gpt-4o",
+        memory: bool = True
+    ):
+        print("🚀 Initializing SpendingAgent with SQL-first approach...")
+        print(f"📥 Client data: {client_csv_path}")
+        print(f"📊 Overall data: {overall_csv_path}")
+
+        self.data_store = DataStore(
+            client_csv_path=client_csv_path,
+            overall_csv_path=overall_csv_path
+        )
+
         self.llm = ChatOpenAI(model=model_name, temperature=0)
-        
-        # the tools we have defined under tools package
-        self.tools = [
-            get_spending_summary,
-            get_spending_by_category,
-            get_spending_by_category_date, 
-            get_spending_by_night,
-            analyze_time_patterns
-            
+
+        self.sql_tools = [
+            generate_sql_for_client_analysis,
+            generate_sql_for_benchmark_analysis,
+            execute_generated_sql
         ]
 
-        # Setup memory (optional)
         self.memory = SqliteSaver.from_conn_string(":memory:") if memory else None
-        
-        # Build the graph
-        self.graph = self._build_graph()
-        print(self.graph.get_graph().draw_mermaid())
-    
-    def _build_graph(self) -> StateGraph:
-        """Build the LangGraph workflow"""
 
+        self.graph = self._build_graph()
+        print("✅ SpendingAgent initialized with SQL-first capabilities!")
+
+    def _build_graph(self) -> StateGraph:
+        """Build the SQL-first LangGraph workflow"""
         workflow = StateGraph(SpendingAgentState)
 
-        # the nodes in the graph
-        workflow.add_node("intent_classifier",    self._intent_classifier_node)
-        workflow.add_node("tool_executor",        self._custom_tool_executor)
-        workflow.add_node("collector",            self._collect_tool_outputs)
-        workflow.add_node("response_generator",   self._response_generator_node)
-        workflow.add_node("error_handler",        self._error_handler_node)
+        workflow.add_node("intent_classifier", self._intent_classifier_node)
+        workflow.add_node("sql_generator",    self._sql_generator_node)
+        workflow.add_node("sql_executor",     self._sql_executor_node)
+        workflow.add_node("data_analyzer",    self._data_analyzer_node)
+        workflow.add_node("response_generator", self._response_generator_node)
+        workflow.add_node("error_handler",    self._error_handler_node)
 
-        #the entry or start to our graph
         workflow.set_entry_point("intent_classifier")
 
-        #After intent, branch on success or error
         workflow.add_conditional_edges(
             "intent_classifier",
             self._route_after_intent,
-            {
-                "execute_tools": "tool_executor",
-                "error":          "error_handler"
-            }
+            {"generate_sql": "sql_generator", "error": "error_handler"}
         )
 
-        workflow.add_edge("tool_executor",      "collector")
-        workflow.add_edge("collector",          "response_generator")
+        workflow.add_edge("sql_generator",      "sql_executor")
+        workflow.add_edge("sql_executor",       "data_analyzer")
+        workflow.add_edge("data_analyzer",      "response_generator")
         workflow.add_edge("response_generator", END)
-        workflow.add_edge("error_handler",     END)
+        workflow.add_edge("error_handler",      END)
 
-        print("Let Print the Graph now")
-
-
-
-
-        # Compile with optional checkpointing
         return workflow.compile(checkpointer=self.memory)
+
     def _intent_classifier_node(self, state: SpendingAgentState) -> SpendingAgentState:
-        """Classify user intent and select appropriate tools via structured JSON from the LLM."""
-        # 1) Build the classification prompt
+        """Enhanced intent classification with analysis type detection"""
+        classification_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are an advanced AI assistant for banking analysis. Classify user queries and determine the analysis approach.
 
-        classification_prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", 
-                "You are an AI assistant that helps classify user queries about spending analytics. "
-                "Based on the user's query, select the appropriate tool(s) to use and provide the necessary parameters in a JSON format.\n\n"
-                "Available tools:\n"
-                "1. get_spending_summary(client_id: int, start_date: str, end_date: str)\n"
-                "2. analyze_time_patterns(client_id: int)\n"
-                "3. get_spending_by_category(client_id: int, start_date: str, end_date: str, top_n: int = 10)\n"
-                "4. get_spending_by_category_date(client_id: int, start_date: str, end_date: str)\n"
-                "5. get_spending_by_night(client_id: int, start_date: str, end_date: str, night_start: int = 22, night_end: int = 6)\n\n"
-                "Always respond in this exact JSON structure:\n\n"
-                "{{\n"
-                "  \"tools_to_use\": [\"tool_name\"],\n"
-                "  \"tool_parameters\": {{\n"
-                "    \"tool_name\": {{\n"
-                "      \"client_id\": 123,\n"
-                "      \"start_date\": \"YYYY-MM-DD\",\n"
-                "      \"end_date\": \"YYYY-MM-DD\"\n"
-                "    }}\n"
-                "  }},\n"
-                "  \"execution_order\": [\"tool_name\"],\n"
-                "  \"query_type\": \"summary|time_patterns|category_breakdown|category_date|night_analysis\"\n"
-                "}}"
-                "Use only valid JSON syntax. Do not explain. Do not include markdown or code blocks. "
-                "Wrap everything inside a valid JSON object with double quotes."
-                ),
-                MessagesPlaceholder(variable_name="messages")
-            ]
-        )
-        messages = [
-            HumanMessage(content=state["user_query"])
-        ]
+                ANALYSIS TYPES:
+                - "personal": Focus only on client’s personal spending patterns
+                - "comparative": Compare client to market benchmarks/demographics
+                - "hybrid": Both personal analysis AND market comparison
 
-        prompt_inputs = classification_prompt.invoke({"messages": messages})
+                Respond in JSON:
+                {
+                "analysis_type": "personal|comparative|hybrid",
+                "requires_client_data": true|false,
+                "requires_benchmark_data": true|false,
+                "query_focus": "spending_summary|category_analysis|time_patterns|comparison",
+                "time_period": "last_month|last_quarter|last_year|specific_dates|all_time",
+                "confidence": 0.9
+                }
 
-
-
+                Classify this query:"""),
+            ("human", "{user_query}")
+        ])
 
         try:
-            # Debug: entering classifier
-            print("⏺️ [DEBUG] Running intent classifier for:", state['user_query'])
-            
-            print("[DEBUG] About to call llm.invoke()")
-            llm_resp = self.llm.invoke(prompt_inputs)
-            print("[DEBUG] llm.invoke() succeeded")
-            print("[DEBUG] LLM response:\n", llm_resp.content)
-            
-            #  Parse JSON payload
-            payload = json.loads(llm_resp.content.strip())
-            tool_params = payload["tool_parameters"]
+            print("🧠 [DEBUG] Classifying:", state['user_query'])
+            resp = self.llm.invoke(
+                classification_prompt.format_messages(user_query=state['user_query'])
+            )
+            print("[DEBUG] LLM intent response:", resp.content)
+            intent_data = json.loads(resp.content.strip())
 
-            #  Normalize any "start"/"end" keys to "start_date"/"end_date"
-            for name, args in tool_params.items():
-                if "start" in args and "end" in args:
-                    args["start_date"] = args.pop("start")
-                    args["end_date"]   = args.pop("end")
-            
-            tools_to_use    = payload["tools_to_use"]
-            execution_order = payload["execution_order"]
-            query_type      = payload["query_type"]
-            confidence      = float(payload.get("confidence", 0))
-
-            # 3) Populate state.intent
-            state['intent'] = {
-                "tools_to_use":     tools_to_use,
-                "tool_parameters":  tool_params,
-                "execution_order":  execution_order,
-                "query_type":       query_type,
-                "confidence":       confidence
-            }
+            state['intent'] = intent_data
+            state['analysis_type'] = intent_data.get('analysis_type', 'personal')
             state['execution_path'].append("intent_classifier")
 
-            # 4) Build tool_calls
-            tool_calls = []
-            for name in execution_order:
-                tool_calls.append({
-                    "name": name,
-                    "args": tool_params[name],
-                    "id":   f"call_{name}_{len(state['messages'])}"
-                })
-
-            # 5) Enqueue AIMessage that routes to tools
             state['messages'].append(AIMessage(
-                content="Routing your query to the appropriate analysis tools now.",
-                tool_calls=tool_calls
+                content=f"Classified as {state['analysis_type']} analysis. Generating SQL queries..."
             ))
 
-        except json.JSONDecodeError:
-            state['error'] = (
-                "Failed to parse JSON from the intent classifier. "
-                "Please ensure the LLM response is valid JSON."
-            )
-            return state
+        except json.JSONDecodeError as e:
+            state['error'] = f"Intent classification JSON error: {e}"
         except Exception as e:
             state['error'] = f"Intent classification error: {e}"
-            return state
 
         return state
-    
 
-    def _custom_tool_executor(self, state: SpendingAgentState) -> SpendingAgentState:
-        """Execute tools and store outputs as messages."""
+    def _sql_generator_node(self, state: SpendingAgentState) -> SpendingAgentState:
+        """Generate appropriate SQL queries based on intent"""
         try:
-            tool_outputs = []
-            for tool_name in state['intent']['execution_order']:
-                # Find the tool
-                tool_fn = next(t for t in self.tools if t.name == tool_name)
-                params = state['intent']['tool_parameters'][tool_name]
-        
-                result = tool_fn.invoke(params)
-                print(f"These are the results {result}")
-                
-                tool_outputs.append(result)
-                state['messages'].append(AIMessage(content=json.dumps(result),tool_calls=None))  # Store result
-            state['execution_path'].append("tool_executor")
+            print("🔧 [DEBUG] Generating SQL queries...")
+            intent = state.get('intent', {}) or {}
+            to_gen: List[str] = []
+            if intent.get('requires_client_data', True):
+                to_gen.append('client_analysis')
+            if intent.get('requires_benchmark_data', False):
+                to_gen.append('benchmark_analysis')
+
+            sql_queries: List[Dict[str, Any]] = []
+            for qtype in to_gen:
+                if qtype == 'client_analysis':
+                    client_sql = generate_sql_for_client_analysis.invoke({
+                        'user_query': state['user_query'],
+                        'client_id': state['client_id']
+                    })
+                    sql_queries.append(client_sql)
+                else:
+                    benchmark_sql = generate_sql_for_benchmark_analysis.invoke({
+                        'user_query': state['user_query'],
+                        'demographic_filters': self._get_client_demographics(state['client_id'])
+                    })
+                    sql_queries.append(benchmark_sql)
+
+            state['sql_queries'] = sql_queries
+            state['execution_path'].append("sql_generator")
+            print(f"✅ Generated {len(sql_queries)} SQL queries")
+
         except Exception as e:
-            state['error'] = f"Tool execution failed: {e}"
+            state['error'] = f"SQL generation failed: {e}"
+            print(f"❌ SQL generation error: {e}")
+
         return state
 
-    def _collect_tool_outputs(self, state: SpendingAgentState) -> SpendingAgentState:
-        outputs = []
-        print("≈ current messages:", state['messages'])
-        for msg in state['messages']:
-            if isinstance(msg, AIMessage):
-                tc = getattr(msg, "tool_calls", None)
-                # accept messages with no tool_calls or an empty list
-                if tc is None or tc == []:
-                    try:
-                        outputs.append(json.loads(msg.content))
-                    except json.JSONDecodeError:
-                        pass
-        state['analysis_result'] = outputs
-        state['execution_path'].append("collector")
+    def _sql_executor_node(self, state: SpendingAgentState) -> SpendingAgentState:
+        """Execute generated SQL queries and collect raw data"""
+        try:
+            print("⚡ [DEBUG] Executing SQL queries...")
+            raw = []
+            for info in state.get('sql_queries', []) or []:
+                sql = info.get('sql_query')
+                if not sql:
+                    continue
+                exec_res = execute_generated_sql.invoke({
+                    'sql_query': sql,
+                    'query_type': info.get('query_type', 'unknown')
+                })
+                raw.append({
+                    'query_type':    info.get('query_type'),
+                    'original_query': info.get('original_query'),
+                    'sql_executed':   sql,
+                    'results':        exec_res.get('results', []),
+                    'row_count':      exec_res.get('row_count', 0),
+                    'error':          exec_res.get('error')
+                })
+                print(f" ✅ Executed {info.get('query_type')}: {exec_res.get('row_count', 0)} rows")
+
+            state['raw_data'] = raw
+            state['execution_path'].append("sql_executor")
+
+        except Exception as e:
+            state['error'] = f"SQL execution failed: {e}"
+            print(f"❌ SQL execution error: {e}")
+
         return state
 
+    def _data_analyzer_node(self, state: SpendingAgentState) -> SpendingAgentState:
+        """Analyze raw SQL results using local processing (hybrid)"""
+        try:
+            print("📊 [DEBUG] Analyzing raw data...")
+            analysis: List[Dict[str, Any]] = []
+            for chunk in state.get('raw_data', []) or []:
+                df = pd.DataFrame(chunk.get('results', []))
+                if chunk.get('query_type') == 'client_analysis':
+                    analysis.append({
+                        'type': 'personal_analysis',
+                        'data': self._analyze_personal_spending(df)
+                    })
+                else:
+                    analysis.append({
+                        'type': 'benchmark_analysis',
+                        'data': self._analyze_benchmark_data(df)
+                    })
 
-      
+            state['analysis_result'] = analysis
+            state['execution_path'].append("data_analyzer")
+            print(f"✅ Completed analysis: {len(analysis)} result sets")
+
+        except Exception as e:
+            state['error'] = f"Data analysis failed: {e}"
+            print(f"❌ Analysis error: {e}")
+
+        return state
+
+    def _analyze_personal_spending(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """Analyze personal spending data with precise calculations"""
+        if df.empty:
+            return {"error": "No personal spending data available"}
+
+        out: Dict[str, Any] = {}
+        if 'amount' in df:
+            out['spending_summary'] = {
+                'total_amount': df['amount'].sum(),
+                'transaction_count': df.shape[0],
+                'average_transaction': df['amount'].mean(),
+                'median_transaction': df['amount'].median(),
+                'max_transaction': df['amount'].max(),
+                'min_transaction': df['amount'].min()
+            }
+        if {'mcc_category', 'amount'}.issubset(df.columns):
+            cat = (df
+                   .groupby('mcc_category')['amount']
+                   .agg(['sum', 'count', 'mean'])
+                   .round(2)
+                   .sort_values('sum', ascending=False))
+            out['category_breakdown'] = {
+                'top_categories': cat.head(5).to_dict('index'),
+                'total_categories': len(cat)
+            }
+        if {'is_weekend', 'amount'}.issubset(df.columns):
+            w = df.groupby('is_weekend')['amount'].agg(['sum', 'count', 'mean']).to_dict()
+            out['time_patterns'] = {'weekend_vs_weekday': w}
+
+        return out
+
+    def _analyze_benchmark_data(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """Analyze benchmark data for comparisons"""
+        if df.empty:
+            return {"error": "No benchmark data available"}
+
+        out: Dict[str, Any] = {}
+        if 'amount' in df:
+            out['market_benchmarks'] = {
+                'market_average': df['amount'].mean(),
+                'market_median': df['amount'].median(),
+                'sample_size': df.shape[0]
+            }
+        if {'current_age', 'amount'}.issubset(df.columns):
+            age_map = df.groupby('current_age')['amount'].mean().to_dict()
+            out['demographic_patterns'] = {'spending_by_age': age_map}
+
+        return out
+
     def _response_generator_node(self, state: SpendingAgentState) -> SpendingAgentState:
-        """Generate final, conversational reply from structured tool outputs."""
-        # 1) Build a cleaner prompt
+        """Generate comprehensive response combining personal and benchmark insights"""
         response_prompt = ChatPromptTemplate.from_messages([
-                ("system", """You are a friendly, expert financial assistant. 
-        You’ve already run the following analyses (as JSON). 
-        Now turn that into a clear, conversational answer:
+            ("system", """You are an expert financial advisor. Create a comprehensive, actionable response based on the analysis results.
 
-        - Begin with a direct summary.
-        - Highlight top insights (numbers, percentages).
-        - Offer one actionable tip if relevant.
-        - Keep it concise and easy to read.
-        """),
-                ("human", """
-        Original Query: {query}
+            RESPONSE STRUCTURE:
+            1. **Direct Answer**: Address the user’s question first
+            2. **Key Insights**: Highlight top findings with numbers
+            3. **Comparisons**: Offer meaningful benchmarks if available
+            4. **Recommendations**: 2–3 actionable tips
 
-        Tool Results (JSON):
-        {results}
+            Analysis Type: {analysis_type}"""),
+                        ("human", """
+            Original Query: {query}
 
-        Please write the user‑facing reply now.
-        """)
-            ])
+            Analysis Results:
+            {results}
+
+            Please craft the final user-facing reply.
+            """)
+        ])
 
         try:
-            # 2) Grab the structured results
-            results = state.get('analysis_result') or []
+            results = state.get('analysis_result', []) or []
+            results_json = json.dumps(results, indent=2, default=str)
 
-            # 3) Serialize just once
-            results_json = json.dumps(results, indent=2)
-
-            
-            response = self.llm.invoke(
+            resp = self.llm.invoke(
                 response_prompt.format_messages(
+                    analysis_type=state.get('analysis_type', 'personal'),
                     query=state['user_query'],
                     results=results_json
                 )
             )
-
-            # 5) Save and mark progression
-            state['response'] = response.content
+            state['response'] = resp.content
             state['execution_path'].append("response_generator")
 
         except Exception as e:
             state['error'] = f"Response generation error: {e}"
             state['response'] = (
-                "Sorry, I ran into an issue putting together your answer. "
-                "Could you try rephrasing?"
+                "I analyzed your data but ran into a response error. "
+                "Please try rephrasing or ask about: spending summary, "
+                "category breakdown, or market comparison."
             )
-
         return state
 
-    
     def _error_handler_node(self, state: SpendingAgentState) -> SpendingAgentState:
-        """Handle errors gracefully"""
-        
-        error_message = state.get('error', 'Unknown error occurred')
-        
-        state['response'] = f"""I apologize, but I encountered an issue while processing your request: {error_message}
-
-        Please try:
-        - Rephrasing your question
-        - Being more specific about the time period or category
-        - Asking about a different aspect of your spending
-
-        I'm here to help analyze your spending patterns whenever you're ready!"""
-        
+        """Enhanced error handling with helpful suggestions"""
+        msg = state.get('error', 'Unknown error occurred')
+        state['response'] = (
+            f"I encountered an error: {msg}\n\n"
+            "🔧 Try:\n"
+            "- “Show me my spending summary for last month”\n"
+            "- “How does my restaurant spending compare?”\n"
+            "- “Break down my spending by category”"
+        )
         state['execution_path'].append("error_handler")
         return state
-    
+
     def _route_after_intent(self, state: SpendingAgentState) -> str:
-        """Route after intent classification"""
-        if state.get('error'):
+        """Enhanced routing logic"""
+        if state.get('error') or not state.get('intent'):
             return "error"
-        
-        intent = state.get('intent')
-        if not intent or not intent.get('tools_to_use'):
-            return "error"
-        
-        return "execute_tools"
-    
-    def process_query(self, client_id: int, user_query: str, config: Dict = None) -> Dict[str, Any]:
-        """Process a spending query for a specific client"""
-        
-        # Initial state
-        initial_state = SpendingAgentState(
+        return "generate_sql"
+
+    def _get_client_demographics(self, client_id: int) -> Dict[str, Any]:
+        """Get client demographics for benchmark filtering"""
+        try:
+            df = self.data_store.get_client_data(client_id)
+            if not df.empty:
+                row = df.iloc[0]
+                return {
+                    'age_min': max(18, row['current_age'] - 5),
+                    'age_max': min(80, row['current_age'] + 5),
+                    'gender': row['gender'],
+                    'income_min': row['yearly_income'] * 0.8
+                }
+        except Exception:
+            pass
+        return {}
+
+    def process_query(
+        self,
+        client_id: int,
+        user_query: str,
+        config: Dict = None
+    ) -> Dict[str, Any]:
+        """Process a spending query with SQL-first approach"""
+        initial = SpendingAgentState(
             client_id=client_id,
             user_query=user_query,
             intent=None,
+            sql_queries=None,
+            raw_data=None,
             analysis_result=None,
             response=None,
             messages=[HumanMessage(content=user_query)],
             error=None,
-            execution_path=[]
+            execution_path=[],
+            analysis_type=None
         )
-        
-        # Run the graph
+
         try:
-            final_state = self.graph.invoke(initial_state, config=config or {})
-            
+            final = self.graph.invoke(initial, config=config or {})
             return {
                 "client_id": client_id,
                 "query": user_query,
-                "response": final_state.get('response'),
-                "analysis_result": final_state.get('analysis_result'),
-                "intent": final_state.get('intent'),
-                "execution_path": final_state.get('execution_path'),
-                "error": final_state.get('error'),
-                "timestamp": datetime.now().isoformat(),
-                "tools_used": final_state.get('intent', {}).get('tools_to_use', [])
+                "response": final.get('response'),
+                "analysis_type": final.get('analysis_type'),
+                "sql_queries": final.get('sql_queries'),
+                "analysis_result": final.get('analysis_result'),
+                "execution_path": final.get('execution_path'),
+                "error": final.get('error'),
+                "timestamp": datetime.now().isoformat()
             }
         except Exception as e:
             return {
                 "client_id": client_id,
                 "query": user_query,
-                "response": f"I encountered an error processing your request: {str(e)}",
+                "response": f"Error processing request: {e}",
                 "error": str(e),
                 "timestamp": datetime.now().isoformat()
             }
-    
-    def get_available_tools(self) -> List[Dict[str, Any]]:
-        """Get information about available tools"""
-        return [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "args_schema": tool.args_schema.schema() if hasattr(tool, 'args_schema') else None
-            }
-            for tool in self.tools
-        ]
-    
 
     def demo_spending_agent(self):
-        """Demonstrate the Spending Agent capabilities with example calls"""
-        # # Update this path to point to your banking CSV file
-        # data_path = 'C:/Users/mohib.alikhan/Desktop/Banking-Agent/Banking_Data.csv'
-        # print(f"Loading data from: {data_path}")
-        # try:
-        #     agent = SpendingAgent(data_path, memory=False)
-        # except Exception as e:
-        #     print(f"Error initializing agent: {e}")
-        #     return
+        """Demonstrate the enhanced SpendingAgent capabilities"""
+        print("\n" + "="*60)
+        print("🚀 SQL-FIRST SPENDING AGENT DEMO")
+        print("="*60)
 
-        # # List available tools
-        # print("\nAvailable tools:")
-        # for tool in agent.get_available_tools():
-        #     print(f"- {tool['name']}: {tool.get('description', 'No description')} (args: {tool.get('args_schema')})")
+        examples = [
+            (430, 'How much did I spend last month?')
+            # (430, 'Show me my top spending categories'),
+            # (430, 'How does my restaurant spending compare to others my age?'),
+            # (430, 'Am I spending more than average on groceries?')
+        ]
 
-        # # Example queries
-        # examples = [
-        #     ('430', 'How much did I spend last month?')
-        # ]
-
-        # for client_id, query in examples:
-        #     print(f"\n=== Query: '{query}' for client {client_id} ===")
-        #     try:
-        #         result = agent.process_query(client_id=client_id, user_query=query)
-        #         print("Response:")
-        #         print(result.get('response'))
-        #         print("Full result object:")
-        #         print(json.dumps(result, indent=2))
-        #     except Exception as e:
-        #         print(f"Error processing query '{query}': {e}")
-        # 1) Create your agent
-
-
-
+        for cid, qry in examples:
+            print(f"\n🔍 Query: '{qry}' for client {cid}")
+            print("-" * 50)
+            try:
+                res = self.process_query(client_id=cid, user_query=qry)
+                print(f"✅ Analysis Type: {res.get('analysis_type')}")
+                print(f"🔧 SQL Queries: {len(res.get('sql_queries') or [])}")
+                print(f"🛤️ Path: {' → '.join(res.get('execution_path') or [])}")
+                print(f"\n💬 Response:\n{res.get('response')}")
+                if res.get('error'):
+                    print(f"❌ Error: {res['error']}")
+            except Exception as e:
+                print(f"❌ Error processing '{qry}': {e}")
+            print("\n" + "."*50)
 
 
 if __name__ == "__main__":
-    print("This is our 9010 try")
-    # SpendingAgent('C:/Users/mohib.alikhan/Desktop/Banking-Agent/Banking_Data.csv').demo_spending_agent()
-    agent = SpendingAgent("C:/Users/mohib.alikhan/Desktop/Banking-Agent/Banking_Data.csv", memory=False)
+    print("🚀 SQL-First SpendingAgent Demo")
+    client_csv = "C:/Users/mohib.alikhan/Desktop/Banking-Agent/Banking_Data.csv"
+    overall_csv = "C:/Users/mohib.alikhan/Desktop/Banking-Agent/overall_data.csv"
 
-    # 2) Build a fake state with intent already populated
-    state = {
-    "client_id":       430,
-    "user_query":      "ignored",
-    "intent": {
-        "execution_order":     ["get_spending_summary"],
-        "tool_parameters": {
-        "get_spending_summary": {
-            "client_id": 430,
-            "start_date": "2023-09-01",
-            "end_date":   "2023-09-30"
-        }
-        }
-    },
-    "messages":        [],      # executor will append directly here
-    "analysis_result": None,
-    "response":        None,
-    "error":           None,
-    "execution_path":  []
-    }
-
-    # 3) Run only your executor + collector
-    state = agent._custom_tool_executor(state)
-    state = agent._collect_tool_outputs(state)
-
-    # 4) Inspect
-    print("Execution path:", state["execution_path"])
-    print("Raw outputs:", state["analysis_result"])
-    print("\n" + "="*60)
-
-
-    
- 
-
-
-
+    try:
+        agent = SpendingAgent(
+            client_csv_path=client_csv,
+            overall_csv_path=overall_csv,
+            memory=False
+        )
+        agent.demo_spending_agent()
+    except Exception as e:
+        print(f"❌ Failed to initialize agent: {e}")
