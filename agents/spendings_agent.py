@@ -383,6 +383,8 @@ Analyze this query and provide structured classification:""",
             state["execution_path"].append("sql_generator")
 
             print(f"✅ Generated {len(sql_queries)} SQL queries successfully")
+            print(json.dumps([q["sql_query"] for q in sql_queries], indent=2))
+
 
         except Exception as e:
             state["error"] = f"SQL generation failed: {e}"
@@ -450,6 +452,9 @@ Analyze this query and provide structured classification:""",
 
             print(f"✅ Successfully executed {len(raw_data)} queries")
 
+            print(f"🔍 [DEBUG] Results for query {i+1}:")
+            print(json.dumps(raw_data[-1], indent=2, default=str))
+
         except Exception as e:
             state["error"] = f"SQL execution failed: {e}"
             print(f"❌ SQL execution error: {e}")
@@ -508,6 +513,8 @@ Analyze this query and provide structured classification:""",
 
             state["analysis_result"] = analysis_results
             state["execution_path"].append("data_analyzer")
+
+            print(f"This is the analysis result {state["analysis_result"]}")
 
             print(f"✅ Completed analysis: {len(analysis_results)} result sets")
 
@@ -913,7 +920,6 @@ def test_full_spending_agent():
     print("🧪 TESTING COMPLETE SPENDING AGENT WORKFLOW")
     print("=" * 60)
 
-    # Update these paths to your actual CSV files
     client_csv = "/Users/mohibalikhan/Desktop/banking-agent/banking_agent/Banking_Data.csv"
     overall_csv = (
         "/Users/mohibalikhan/Desktop/banking-agent/banking_agent/overall_data.csv"
@@ -923,13 +929,8 @@ def test_full_spending_agent():
         agent = SpendingAgent(
             client_csv_path=client_csv, overall_csv_path=overall_csv, memory=False
         )
-
-        # Test queries that should now work
         test_queries = [
-            "How much did I spend last month?",
-            "Show me my top spending categories",
-            "What did I spend on restaurants?",
-            "What's my average transaction amount?",
+            "How much did I spend last month?"
         ]
 
         for query in test_queries:
@@ -943,10 +944,11 @@ def test_full_spending_agent():
                 print(f"📊 Analysis Type: {result.get('analysis_type', 'N/A')}")
                 print(f"🔧 SQL Queries: {result.get('sql_queries', 0)}")
 
+
                 # Show the actual response
                 response = result.get("response", "No response")
                 print("\n💬 Response:")
-                print(response[:300] + "..." if len(response) > 300 else response)
+                print(response)
 
                 if result.get("error"):
                     print(f"❌ Error: {result['error']}")
@@ -960,51 +962,10 @@ def test_full_spending_agent():
         print(f"❌ Failed to initialize agent: {e}")
 
 
-# Also add this debugging helper to see raw analysis results:
-def debug_raw_sql_results():
-    """Debug what the SQL queries are actually returning"""
 
-    print("🔍 DEBUGGING RAW SQL RESULTS")
-    print("=" * 40)
-
-    from data_store.data_store import _ensure_datastore, execute_generated_sql
-
-    # Test the actual SQL queries your agent generates
-    test_sqls = [
-        ("Total spending", "SELECT SUM(amount) FROM client_transactions WHERE client_id = 430"),
-        (
-            "Category breakdown",
-            "SELECT mcc_category, SUM(amount) as total FROM client_transactions WHERE client_id = 430 GROUP BY mcc_category ORDER BY total DESC LIMIT 5",
-        ),
-        (
-            "Recent transactions",
-            "SELECT date, amount, mcc_category FROM client_transactions WHERE client_id = 430 ORDER BY date DESC LIMIT 5",
-        ),
-    ]
-
-    for desc, sql in test_sqls:
-        print(f"\n📝 {desc}:")
-        try:
-            result = execute_generated_sql.invoke(
-                {"sql_query": sql, "query_type": "test"}
-            )
-
-            if "error" in result:
-                print(f" ❌ Error: {result['error']}")
-            else:
-                print(f" ✅ {result['row_count']} rows returned")
-                # Show sample results
-                results = result.get("results", [])
-                for i, row in enumerate(results[:3]):  # Show first 3 rows
-                    print(f" Row {i+1}: {row}")
-
-        except Exception as e:
-            print(f" ❌ Exception: {e}")
-
+            
 
 if __name__ == "__main__":
-    # First debug the raw SQL to make sure data is there
-    debug_raw_sql_results()
 
     print("\n" + "=" * 60)
 

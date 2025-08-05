@@ -635,6 +635,40 @@ def _ensure_datastore() -> DataStore:
 
 
 
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+from typing import Any, Dict, Optional
+
+
+def get_current_date_context() -> str:
+    """Generate current date context for LLM prompts."""
+    now = datetime.now()
+
+    # Calculate relevant dates
+    last_month_start = (now - relativedelta(months=1)).replace(day=1)
+    last_month_end = now.replace(day=1) - timedelta(days=1)
+    current_month_start = now.replace(day=1)
+    last_year_start = (now.replace(month=1, day=1) - relativedelta(years=1))
+    last_year_end = now.replace(month=1, day=1) - timedelta(days=1)
+
+    context = f"""
+CURRENT DATE CONTEXT:
+
+- Today’s date: {now.strftime("%Y-%m-%d")}
+- Current year: {now.year}
+- Current month: {now.strftime("%Y-%m")}
+- Last month: {last_month_start.strftime("%Y-%m-%d")} to {last_month_end.strftime("%Y-%m-%d")}
+- Current month so far: {current_month_start.strftime("%Y-%m-%d")} to {now.strftime("%Y-%m-%d")}
+- Last year: {last_year_start.strftime("%Y-%m-%d")} to {last_year_end.strftime("%Y-%m-%d")}
+
+WHEN USER SAYS:
+
+- “last month” → use dates {last_month_start.strftime("%Y-%m-%d")} to {last_month_end.strftime("%Y-%m-%d")}
+- “this month” → use dates {current_month_start.strftime("%Y-%m-%d")} to {now.strftime("%Y-%m-%d")}
+- “last year” → use dates {last_year_start.strftime("%Y-%m-%d")} to {last_year_end.strftime("%Y-%m-%d")}
+- “recent” or “lately” → use last 30 days: {(now - timedelta(days=30)).strftime("%Y-%m-%d")} to {now.strftime("%Y-%m-%d")}
+"""
+    return context
 
 @tool
 def generate_sql_for_client_analysis(
@@ -642,14 +676,16 @@ def generate_sql_for_client_analysis(
     client_id: int
 ) -> Dict[str, Any]:
     """
-    Generate optimized SQL for client_transactions from a natural language query.
-    Always includes client_id filter and uses proper indexes.
+    Generate optimized SQL for client_transactions with current date context.
     """
     ds = _ensure_datastore()
     schema = ds.get_schema_info()["client_transactions"]
 
+    # Get current date context
+    date_context = get_current_date_context()
+
     # Build schema description
-    schema_desc = [
+    schema_desc_lines = [
         "CLIENT_TRANSACTIONS TABLE:",
         f"Description: {schema['description']}",
         "",
@@ -668,24 +704,34 @@ def generate_sql_for_client_analysis(
         "yearly_income": "REAL - Annual income"
     }
     for col, desc in important_columns.items():
-        schema_desc.append(f"- {col}: {desc}")
-    schema_desc = "\n".join(schema_desc)
+        schema_desc_lines.append(f"- {col}: {desc}")
+    schema_desc = "\n".join(schema_desc_lines)
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", f"""\
+        ("system", f"""
 You are an expert SQL generator for banking transaction analysis.
 Generate efficient SQLite queries against client_transactions.
+
+{date_context}
 
 {schema_desc}
 
 CRITICAL REQUIREMENTS:
 - ALWAYS include WHERE client_id = {client_id}
+- Use the CURRENT DATE CONTEXT above for date filtering
+- NEVER use hardcoded years like 2023 - always use the current dates provided
 - Use indexed columns: client_id, date, mcc_category, amount
 - Date format YYYY-MM-DD
+- Use Aliases in your query
 - Aggregates: SUM, AVG, COUNT
 - RETURN ONLY THE SQL QUERY - no explanations or markdown
 
-Generate ONLY the SQL query for:"""),
+EXAMPLES:
+- “last month spending” → WHERE date >= ‘YYYY-MM-DD’ AND date <= ‘YYYY-MM-DD’ (use last month dates from context)
+- “this year” → WHERE date >= ‘YYYY-01-01’ AND date <= ‘YYYY-MM-DD’ (current year)
+
+Generate ONLY the SQL query for:
+"""),
         ("human", "{user_query}")
     ])
 
@@ -712,16 +758,21 @@ Generate ONLY the SQL query for:"""),
         if f"client_id = {client_id}" not in sql:
             return {"error": f"Missing client_id filter: {sql}"}
 
+        # Check for hardcoded 2023 dates and warn
+        if "2023" in sql:
+            print(f"⚠️ WARNING: Found hardcoded 2023 date in SQL: {sql}")
+
         return {
             "sql_query": sql,
             "query_type": "client_analysis",
             "client_id": client_id,
             "original_query": user_query,
-            "optimization_used": "client_id index + compound indexes"
+            "optimization_used": "client_id index + compound indexes",
+            "date_context_applied": True
         }
+
     except Exception as e:
         return {"error": f"SQL generation failed: {e}"}
-
 
 @tool
 def generate_sql_for_benchmark_analysis(
@@ -729,14 +780,16 @@ def generate_sql_for_benchmark_analysis(
     demographic_filters: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
-    Generate optimized SQL for overall_transactions to get market benchmarks.
-    Uses demographic filters and proper indexing for performance.
+    Generate optimized SQL for overall_transactions with current date context.
     """
     ds = _ensure_datastore()
     schema = ds.get_schema_info()["overall_transactions"]
 
+    # Get current date context
+    date_context = get_current_date_context()
+
     # Build schema description
-    schema_desc = [
+    schema_desc_lines = [
         "OVERALL_TRANSACTIONS TABLE:",
         f"Description: {schema['description']}",
         "",
@@ -753,39 +806,47 @@ def generate_sql_for_benchmark_analysis(
         "is_night_txn": "BOOLEAN - Night transaction flag"
     }
     for col, desc in important_columns.items():
-        schema_desc.append(f"- {col}: {desc}")
-    schema_desc = "\n".join(schema_desc)
+        schema_desc_lines.append(f"- {col}: {desc}")
+    schema_desc = "\n".join(schema_desc_lines)
 
     # Build filter context
     filter_ctx = ""
     if demographic_filters:
-        filter_ctx = "\nAPPLY THESE DEMOGRAPHIC FILTERS:\n"
+        filter_lines = ["\nAPPLY THESE DEMOGRAPHIC FILTERS:"]
         for key, val in demographic_filters.items():
             if key == "gender":
-                filter_ctx += f"- gender = '{val}'\n"
+                filter_lines.append(f"- gender = '{val}'")
             elif key == "age_min":
-                filter_ctx += f"- current_age >= {val}\n"
+                filter_lines.append(f"- current_age >= {val}")
             elif key == "age_max":
-                filter_ctx += f"- current_age <= {val}\n"
+                filter_lines.append(f"- current_age <= {val}")
             elif key == "income_min":
-                filter_ctx += f"- yearly_income >= {val}\n"
+                filter_lines.append(f"- yearly_income >= {val}")
             elif key == "income_max":
-                filter_ctx += f"- yearly_income <= {val}\n"
+                filter_lines.append(f"- yearly_income <= {val}")
+        filter_ctx = "\n".join(filter_lines)
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", f"""\
+        ("system", f"""
 You are an expert SQL generator for market benchmark analysis.
 Generate SQLite queries against overall_transactions.
 
-{schema_desc}{filter_ctx}
+{date_context}
 
-GUIDELINES:
+{schema_desc}
+{filter_ctx}
+
+CRITICAL REQUIREMENTS:
+- Use the CURRENT DATE CONTEXT above for date filtering
+- NEVER use hardcoded years like 2023 - always use the current dates provided
 - Aggregates: AVG(), COUNT(), SUM()
 - Group by: mcc_category, current_age, gender
+- Use Aliases in your query
 - Indexed columns: date, mcc_category, current_age, gender, amount
 - RETURN ONLY THE SQL QUERY - no explanations or markdown
 
-Generate ONLY the SQL query for:"""),
+Generate ONLY the SQL query for:
+"""),
         ("human", "{user_query}")
     ])
 
@@ -807,15 +868,22 @@ Generate ONLY the SQL query for:"""),
             idx = resp.content.upper().find("SELECT")
             sql = resp.content[idx:].split("\n\n")[0].strip()
 
+        # Check for hardcoded 2023 dates and warn
+        if "2023" in sql:
+            print(f"⚠️ WARNING: Found hardcoded 2023 date in SQL: {sql}")
+
         return {
             "sql_query": sql,
             "query_type": "benchmark_analysis",
             "demographic_filters": demographic_filters,
             "original_query": user_query,
-            "optimization_used": "demographic indexes + compound indexes"
+            "optimization_used": "demographic indexes + compound indexes",
+            "date_context_applied": True
         }
+
     except Exception as e:
         return {"error": f"Benchmark SQL generation failed: {e}"}
+
 
 
 @tool
