@@ -1,54 +1,43 @@
-import sqlite3
 import pandas as pd
 
-def test_queries(db_path: str):
-    # 1) Connect
-    conn = sqlite3.connect(db_path)
-    print(f"Connected to {db_path}\n")
+# 1. Load your raw transactional data
+client_data = pd.read_csv(
+    "/Users/mohibalikhan/Desktop/banking-agent/banking_agent/Banking_Data.csv",
+    parse_dates=["date", "acct_open_date"]
+)
 
-    # 2) List all tables
-    tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table';", conn)
-    print("Tables in database:")
-    print(tables, "\n")
+# 2. Define which columns are PII and should be removed
+pii_cols = [
+    "transaction_id",  # internal key
+    "client_id",       # direct client identifier
+    "card_id",         # individual card number
+    "acct_open_date",  # exact account inception
+    "merchant_city",   # location detail
+    "merchant_state",
+    "zip",             # postal code
+]
 
-    # 3) Show schema for client_transactions
-    schema_client = pd.read_sql("PRAGMA table_info(client_transactions);", conn)
-    print("client_transactions schema:")
-    print(schema_client, "\n")
+# 3. Drop PII
+overall_data = client_data.drop(columns=pii_cols)
 
-    # 4) Show schema for overall_transactions
-    schema_overall = pd.read_sql("PRAGMA table_info(overall_transactions);", conn)
-    print("overall_transactions schema:")
-    print(schema_overall, "\n")
+# 4. Derive any time-based or categorical flags you need
+overall_data = overall_data.assign(
+    day_name    = client_data["date"].dt.day_name(),
+    month       = client_data["date"].dt.to_period("M").astype(str),
+    txn_hour    = client_data["txn_time"].str.slice(0,2).astype(int),
+)
+overall_data["is_night_txn"] = overall_data["txn_hour"].between(22, 23) | overall_data["txn_hour"].between(0, 6)
+overall_data["is_weekend"]   = client_data["date"].dt.dayofweek >= 5
 
-    # 5) Peek at the first 5 rows of each table
-    print("First 5 client_transactions rows:")
-    print(pd.read_sql("SELECT * FROM client_transactions LIMIT 5;", conn), "\n")
+# 5. (Optional) Reorder columns or cast types
+#   —for example, ensure boolean flags are bool dtype:
+for col in ["is_night_txn", "is_weekend", "use_chip", "card_on_dark_web"]:
+    overall_data[col] = overall_data[col].astype(bool)
 
-    print("First 5 overall_transactions rows:")
-    print(pd.read_sql("SELECT * FROM overall_transactions LIMIT 5;", conn), "\n")
+# 6. Inspect
+print(overall_data.shape)
+print(overall_data.dtypes)
+print(overall_data.head())
 
-    # 6) Run a simple aggregate: total spending for client_id=430 last month
-    sql_total = """
-        SELECT
-            SUM(amount) AS total_spent,
-            COUNT(*) AS txn_count,
-            AVG(amount) AS avg_txn
-        FROM client_transactions
-        WHERE client_id = 430
-          AND date >= '2023-07-01'
-          AND date < '2023-08-01';
-    """
-    print("Client 430 spending in July 2023:")
-    print(pd.read_sql(sql_total, conn), "\n")
 
-    # 7) Run a benchmark query: average overall transaction
-    sql_bench = "SELECT AVG(amount) AS avg_overall FROM overall_transactions;"
-    print("Average overall transaction amount:")
-    print(pd.read_sql(sql_bench, conn), "\n")
-
-    conn.close()
-    print("Connection closed.")
-
-if __name__ == "__main__":
-    test_queries("C:/Users/mohib.alikhan/Desktop/Banking-Agent/banking_data.db")
+overall_data.to_csv("overall_data.csv", index = False)
