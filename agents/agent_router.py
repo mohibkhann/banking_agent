@@ -6,12 +6,12 @@ from dataclasses import dataclass
 
 import pandas as pd
 from dotenv import load_dotenv
-from langchain.schema import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph import END, START, StateGraph
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 import os
 import sys
@@ -131,8 +131,9 @@ class PersonalFinanceRouter:
         # Memory management
         self.enable_memory = enable_memory
         if enable_memory:
-            self.memory = SqliteSaver.from_conn_string(memory_db_path)
-            print(f"💾 Memory database: {memory_db_path}")
+            # Use in-memory checkpointer for latest LangGraph
+            self.memory = MemorySaver()
+            print(f"💾 Memory: In-memory checkpointer enabled")
         else:
             self.memory = None
 
@@ -158,7 +159,7 @@ class PersonalFinanceRouter:
         workflow.add_node("memory_updater", self._memory_updater_node)
         workflow.add_node("error_handler", self._error_handler_node)
 
-        # Entry point
+        # Entry point - using string
         workflow.set_entry_point("context_manager")
 
         # Routing logic
@@ -182,10 +183,25 @@ class PersonalFinanceRouter:
         return workflow.compile(checkpointer=self.memory)
 
     def _context_manager_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Manage conversation context and memory"""
+        """Enhanced conversation context and memory management with better follow-up handling"""
 
         try:
             print("🧠 [DEBUG] Managing conversation context...")
+
+            # Basic query validation with better follow-up detection
+            user_query = state["user_query"].strip()
+            
+            # Handle very short or invalid queries, but allow common follow-ups
+            common_followups = ['ok', 'yes', 'no', 'show', 'tell', 'more', 'continue', 'please']
+            query_words = user_query.lower().split()
+            
+            if len(user_query) <= 2 and user_query.lower() not in ['no', 'yes', 'ok']:
+                print(f"[DEBUG] ⚠️ Invalid query detected: '{user_query}'")
+                state["error"] = "Please provide a more complete question about your finances."
+                return state
+            elif len(query_words) <= 3 and all(word in common_followups for word in query_words):
+                # This is a follow-up like "ok please show", "yes tell me", etc.
+                print(f"[DEBUG] 🔄 Follow-up command detected: '{user_query}'")
 
             client_id = state["client_id"]
             session_id = state.get("session_id", f"session_{client_id}_{datetime.now().strftime('%Y%m%d')}")
@@ -195,6 +211,7 @@ class PersonalFinanceRouter:
                 context = self.contexts[session_id]
                 context.last_interaction = datetime.now()
                 context.message_count += 1
+                print(f"[DEBUG] 📝 Continuing conversation: message #{context.message_count}")
             else:
                 context = ConversationContext(
                     client_id=client_id,
@@ -207,24 +224,63 @@ class PersonalFinanceRouter:
                     key_insights=[]
                 )
                 self.contexts[session_id] = context
+                print(f"[DEBUG] 🆕 New conversation started")
 
-            # Add current query topic
-            query_lower = state["user_query"].lower()
-            if "budget" in query_lower:
-                if "budget" not in context.recent_topics:
-                    context.recent_topics.append("budget")
-            if any(word in query_lower for word in ["spend", "spent", "spending", "transaction"]):
-                if "spending" not in context.recent_topics:
-                    context.recent_topics.append("spending")
+            # Enhanced topic detection with context awareness
+            query_lower = user_query.lower()
+            
+            # For follow-up queries, enhance with context
+            is_followup = False
+            followup_patterns = ["ok", "please show", "show me", "tell me", "yes", "continue", "more details"]
+            
+            if any(pattern in query_lower for pattern in followup_patterns) and context.message_count > 1:
+                is_followup = True
+                print(f"[DEBUG] 🔄 Follow-up detected, will use context from previous interaction")
+                
+                # Add context-based intent to the query for better processing
+                if "comparison" in context.recent_topics and any(word in query_lower for word in ["show", "tell", "please"]):
+                    # User likely wants to see the comparison mentioned earlier
+                    state["enhanced_query"] = f"Show me how my spending compares to similar customers (follow-up to previous conversation)"
+                    print(f"[DEBUG] 💡 Enhanced query with context: comparison analysis requested")
+                elif context.last_agent_used == "spending" and any(word in query_lower for word in ["show", "more"]):
+                    state["enhanced_query"] = f"Show me more details about my spending breakdown (follow-up)"
+                    print(f"[DEBUG] 💡 Enhanced query with context: spending details requested")
+                elif context.last_agent_used == "budget" and any(word in query_lower for word in ["show", "tell"]):
+                    state["enhanced_query"] = f"Show me my budget details (follow-up)"
+                    print(f"[DEBUG] 💡 Enhanced query with context: budget details requested")
+            
+            # Detect topics from current query (enhanced or original)
+            enhanced_query = state.get("enhanced_query", user_query)
+            enhanced_lower = enhanced_query.lower()
+            
+            detected_topics = []
+            
+            if any(word in enhanced_lower for word in ["budget", "create", "set up", "overspend", "allocate"]):
+                detected_topics.append("budget")
+            if any(word in enhanced_lower for word in ["spend", "spent", "spending", "transaction", "category", "total", "where did i"]):
+                detected_topics.append("spending")
+            if any(word in enhanced_lower for word in ["save", "savings", "saved"]):
+                detected_topics.append("savings")
+            if any(word in enhanced_lower for word in ["compare", "comparison", "vs", "versus", "against", "average", "similar"]):
+                detected_topics.append("comparison")
+            
+            # Add detected topics to recent topics
+            for topic in detected_topics:
+                if topic not in context.recent_topics:
+                    context.recent_topics.append(topic)
+                    print(f"[DEBUG] 🏷️ Added topic: {topic}")
 
             # Keep only recent topics (last 5)
             context.recent_topics = context.recent_topics[-5:]
+            
+            if is_followup:
+                print(f"[DEBUG] 🔄 Follow-up context: {context.last_agent_used or 'previous'} agent, topics: {context.recent_topics}")
 
             state["conversation_context"] = context
             state["session_id"] = session_id
             state["execution_path"].append("context_manager")
 
-            print(f"[DEBUG] Context updated: {context.message_count} messages, topics: {context.recent_topics}")
+            print(f"[DEBUG] Context: {context.message_count} messages, topics: {context.recent_topics}, last agent: {context.last_agent_used or 'None'}")
 
         except Exception as e:
             print(f"❌ Context management error: {e}")
@@ -233,12 +289,18 @@ class PersonalFinanceRouter:
         return state
 
     def _query_router_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Intelligent query routing with context awareness"""
+        """Intelligent query routing with enhanced follow-up handling"""
 
         try:
             print("🎯 [DEBUG] Routing query to appropriate agent...")
 
             context = state.get("conversation_context")
+            enhanced_query = state.get("enhanced_query")  # May have context-enhanced query
+            original_query = state["user_query"]
+            
+            # Use enhanced query for routing if available, original otherwise
+            query_for_routing = enhanced_query if enhanced_query else original_query
+            
             recent_context = ""
             if context:
                 recent_context = f"""
@@ -263,6 +325,7 @@ You have access to two specialized agents:
 - "What's my average transaction?"
 - "Compare my spending to others"
 - Historical spending analysis
+- Follow-up questions about spending data
 
 **BUDGET AGENT** - Best for:
 - Budget management and planning
@@ -274,58 +337,80 @@ You have access to two specialized agents:
 
 {recent_context}
 
-{self.routing_parser.get_format_instructions()}
+ROUTING RULES:
+1. If user asks about spending/transactions → SPENDING AGENT
+2. If user asks about budgets/budget creation → BUDGET AGENT  
+3. For follow-ups or vague queries → use CONTEXT (last agent or topic)
+4. Simple responses like "ok please show", "yes", "tell me more" → use LAST AGENT + TOPIC CONTEXT
 
-Analyze the query and route intelligently:"""
+Query to analyze: "{query_for_routing}"
+Original user input: "{original_query}"
+
+Respond with just the agent name: "spending" or "budget"
+"""
                 ),
                 (
                     "human",
-                    "Route this query: {user_query}"
+                    "Route this query based on the context provided above."
                 )
             ])
 
             try:
-                chain = routing_prompt | self.llm | self.routing_parser
-                routing_result = chain.invoke({"user_query": state["user_query"]})
+                # Try simple routing without structured parsing
+                chain = routing_prompt | self.llm
+                routing_response = chain.invoke({
+                    "query_for_routing": query_for_routing,
+                    "original_query": original_query
+                })
                 
-                routing_dict = routing_result.model_dump()
-                state["routing_decision"] = routing_dict
+                # Extract agent from response
+                response_text = routing_response.content.lower().strip()
                 
-                print(f"[DEBUG] Routed to: {routing_dict['primary_agent']} (confidence: {routing_dict['confidence']:.2f})")
-                print(f"[DEBUG] Reasoning: {routing_dict['reasoning']}")
-
-            except Exception as parse_error:
-                print(f"[DEBUG] Structured routing failed, using fallback: {parse_error}")
-                
-                # Fallback routing logic
-                query_lower = state["user_query"].lower()
-                
-                budget_keywords = ["budget", "create", "set up", "overspend", "allocate", "limit"]
-                spending_keywords = ["spend", "spent", "spending", "transaction", "category", "total", "average"]
-                
-                if any(word in query_lower for word in budget_keywords):
-                    primary_agent = "budget"
-                    reasoning = "Contains budget-related keywords"
-                elif any(word in query_lower for word in spending_keywords):
+                if "spending" in response_text:
                     primary_agent = "spending"
-                    reasoning = "Contains spending-related keywords"
+                    reasoning = "Query contains spending-related content or context"
+                elif "budget" in response_text:
+                    primary_agent = "budget"
+                    reasoning = "Query contains budget-related content or context"
                 else:
-                    # Default based on context
-                    if context and context.last_agent_used:
-                        primary_agent = context.last_agent_used
-                        reasoning = "Following conversation context"
-                    else:
-                        primary_agent = "spending"
-                        reasoning = "Default to spending analysis"
+                    # Enhanced fallback logic
+                    primary_agent, reasoning = self._enhanced_fallback_routing(
+                        original_query, query_for_routing, context
+                    )
 
                 state["routing_decision"] = {
                     "primary_agent": primary_agent,
                     "secondary_agent": None,
                     "query_type": "analysis",
                     "urgency": "medium",
-                    "confidence": 0.7,
-                    "reasoning": reasoning
+                    "confidence": 0.8,
+                    "reasoning": reasoning,
+                    "routing_method": "context_aware",
+                    "enhanced_query_used": enhanced_query is not None
                 }
+                
+                print(f"[DEBUG] ✅ Routed to: {primary_agent} ({reasoning})")
+                if enhanced_query:
+                    print(f"[DEBUG] 💡 Used enhanced query for routing")
+
+            except Exception as parse_error:
+                print(f"[DEBUG] Context-aware routing failed, using enhanced fallback: {parse_error}")
+                
+                primary_agent, reasoning = self._enhanced_fallback_routing(
+                    original_query, query_for_routing, context
+                )
+
+                state["routing_decision"] = {
+                    "primary_agent": primary_agent,
+                    "secondary_agent": None,
+                    "query_type": "analysis", 
+                    "urgency": "medium",
+                    "confidence": 0.7,
+                    "reasoning": reasoning,
+                    "routing_method": "enhanced_fallback"
+                }
+                
+                print(f"[DEBUG] ✅ Enhanced fallback routed to: {primary_agent} ({reasoning})")
 
             state["execution_path"].append("query_router")
 
@@ -334,16 +419,56 @@ Analyze the query and route intelligently:"""
             state["error"] = f"Query routing failed: {e}"
 
         return state
+    
+    def _enhanced_fallback_routing(self, original_query: str, enhanced_query: str, context) -> tuple:
+        """Enhanced fallback routing with better context awareness"""
+        
+        query_to_analyze = enhanced_query if enhanced_query else original_query
+        query_lower = query_to_analyze.lower()
+        original_lower = original_query.lower()
+        
+        # Strong budget keywords
+        budget_keywords = ["budget", "create", "set up", "overspend", "allocate", "limit", "spending plan"]
+        # Strong spending keywords  
+        spending_keywords = ["spend", "spent", "spending", "transaction", "category", "total", "average", "where did i", "how much", "breakdown", "compare", "comparison"]
+        # Follow-up keywords that need context
+        followup_keywords = ["please show", "show me", "yes", "continue", "more", "details", "tell me", "ok"]
+        
+        if any(word in query_lower for word in budget_keywords):
+            return "budget", "Contains budget-related keywords"
+        elif any(word in query_lower for word in spending_keywords):
+            return "spending", "Contains spending-related keywords"
+        elif any(word in original_lower for word in followup_keywords):
+            # Enhanced follow-up handling
+            if context and context.last_agent_used:
+                if "comparison" in context.recent_topics or "compare" in query_lower:
+                    return "spending", f"Follow-up comparison request, using spending agent"
+                else:
+                    return context.last_agent_used, f"Follow-up question, continuing with {context.last_agent_used} agent"
+            else:
+                return "spending", "Follow-up with no context, defaulting to spending"
+        else:
+            # Default based on conversation history
+            if context and context.last_agent_used:
+                return context.last_agent_used, "Using conversation context"
+            else:
+                return "spending", "Default routing to spending agent"
 
     def _spending_agent_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Execute spending agent query"""
+        """Execute spending agent query with context-aware processing"""
 
         try:
             print("📊 [DEBUG] Executing spending agent query...")
 
+            # Use enhanced query if available, otherwise use original
+            query_to_process = state.get("enhanced_query", state["user_query"])
+            
+            if state.get("enhanced_query"):
+                print(f"[DEBUG] 💡 Processing enhanced query: {query_to_process}")
+
             result = self.spending_agent.process_query(
                 client_id=state["client_id"],
-                user_query=state["user_query"]
+                user_query=query_to_process  # Use context-enhanced query
             )
 
             state["primary_response"] = result.get("response")
@@ -362,14 +487,20 @@ Analyze the query and route intelligently:"""
         return state
 
     def _budget_agent_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Execute budget agent query"""
+        """Execute budget agent query with context-aware processing"""
 
         try:
             print("💰 [DEBUG] Executing budget agent query...")
 
+            # Use enhanced query if available, otherwise use original
+            query_to_process = state.get("enhanced_query", state["user_query"])
+            
+            if state.get("enhanced_query"):
+                print(f"[DEBUG] 💡 Processing enhanced query: {query_to_process}")
+
             result = self.budget_agent.process_query(
                 client_id=state["client_id"],
-                user_query=state["user_query"]
+                user_query=query_to_process  # Use context-enhanced query
             )
 
             state["primary_response"] = result.get("response")
@@ -388,7 +519,7 @@ Analyze the query and route intelligently:"""
         return state
 
     def _response_synthesizer_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Synthesize and enhance the final response"""
+        """Enhanced response synthesis with conversation continuity"""
 
         try:
             print("🔧 [DEBUG] Synthesizing final response...")
@@ -397,29 +528,50 @@ Analyze the query and route intelligently:"""
             context = state.get("conversation_context")
             routing = state.get("routing_decision", {})
 
-            # For now, use primary response directly but add context
-            if context and context.message_count > 1:
-                # Add conversational continuity for multi-turn conversations
-                if context.message_count == 2:
-                    prefix = "Thanks for the follow-up! "
-                elif context.message_count > 5:
-                    prefix = "Continuing our conversation... "
-                else:
-                    prefix = ""
-                
-                state["final_response"] = prefix + primary_response
-            else:
-                state["final_response"] = primary_response
+            if not primary_response:
+                state["final_response"] = "I apologize, but I couldn't generate a response to your query."
+                return state
 
-            # Add helpful suggestions based on agent used
+            # Enhanced conversational continuity
+            prefix = ""
+            if context and context.message_count > 1:
+                # Different prefixes based on conversation state
+                if context.message_count == 2:
+                    if routing.get("routing_method") == "fallback" and context.last_agent_used:
+                        prefix = ""  # No prefix for natural follow-up
+                elif context.message_count > 2:
+                    # Check if this is a follow-up that should be connected
+                    query_lower = state["user_query"].lower()
+                    if any(word in query_lower for word in ["please provide", "show me", "tell me more", "continue", "yes"]):
+                        prefix = ""  # Natural continuation
+                    elif context.last_agent_used == routing.get("primary_agent"):
+                        prefix = ""  # Same agent, natural flow
+                    else:
+                        prefix = f"Switching to {routing.get('primary_agent')} analysis... "
+            
+            # Combine response
+            state["final_response"] = prefix + primary_response
+
+            # Enhanced cross-agent suggestions based on conversation flow
             agent_used = routing.get("primary_agent")
-            if agent_used == "spending" and "budget" not in state["user_query"].lower():
-                state["final_response"] += "\n\n💡 *Would you like help creating a budget based on this spending analysis?*"
-            elif agent_used == "budget" and context and "spending" in context.recent_topics:
-                state["final_response"] += "\n\n📊 *I can also provide detailed spending breakdowns if you'd like more analysis.*"
+            recent_topics = context.recent_topics if context else []
+            
+            suggestion = ""
+            if agent_used == "spending":
+                if "budget" not in recent_topics and context and context.message_count >= 2:
+                    suggestion = "\n\n💡 *Based on this spending analysis, would you like help creating or reviewing a budget?*"
+                elif "comparison" not in recent_topics:
+                    suggestion = "\n\n📊 *I can also show you how your spending compares to similar customers if you're interested.*"
+            elif agent_used == "budget":
+                if "spending" in recent_topics:
+                    suggestion = "\n\n📈 *I can provide more detailed spending breakdowns to help fine-tune your budget.*"
+                elif context and context.message_count <= 2:
+                    suggestion = "\n\n🎯 *I can also analyze your historical spending patterns to suggest better budget allocations.*"
+
+            state["final_response"] += suggestion
 
             state["execution_path"].append("response_synthesizer")
-            print("✅ Response synthesis complete")
+            print("✅ Response synthesis complete with conversation continuity")
 
         except Exception as e:
             print(f"❌ Response synthesis error: {e}")
@@ -582,7 +734,7 @@ def interactive_chat_demo():
     print("🤖 PERSONAL FINANCE CHAT DEMO")
     print("=" * 60)
     print("💬 Chatting as User ID: 430")
-    print("🔧 Type 'quit' to exit, 'summary' for conversation summary")
+    print("🔧 Type 'quit' to exit, 'test' for simple test")
     print("=" * 60)
 
     # Initialize router
@@ -593,26 +745,22 @@ def interactive_chat_demo():
         router = PersonalFinanceRouter(
             client_csv_path=client_csv,
             overall_csv_path=overall_csv,
-            enable_memory=True
+            enable_memory=False  # Disable memory for now to avoid compatibility issues
         )
 
         client_id = 430
         session_id = f"demo_session_{datetime.now().strftime('%Y%m%d_%H%M')}"
         
-        # Demo conversation flow
-        demo_queries = [
-            "How much did I spend last month?",
-            "That seems like a lot, can you break it down by category?",
-            "I want to create a budget to control my spending better",
-            "Set up a $1000 budget for groceries",
-            "How am I doing against my new budget this month?"
-        ]
-
-        print(f"\n🎬 **DEMO CONVERSATION FLOW**")
+        print(f"\n🎬 **SIMPLE TEST MODE**")
         print(f"Session ID: {session_id}")
         print("-" * 40)
 
-        for i, query in enumerate(demo_queries, 1):
+        # Simple test queries first
+        test_queries = [
+            "How much did I spend last month?"
+        ]
+
+        for i, query in enumerate(test_queries, 1):
             print(f"\n👤 **User**: {query}")
             
             result = router.chat(
@@ -622,21 +770,12 @@ def interactive_chat_demo():
             )
 
             print(f"🤖 **Agent** ({result['agent_used'].upper()}): {result['response']}")
-            print(f"⚙️  *Execution: {' → '.join(result['execution_path'])}*")
+            print(f"⚙️  *Success: {result['success']}*")
             
             if result.get('error'):
                 print(f"❌ *Error: {result['error']}*")
-
-            # Small delay for demo effect
-            import time
-            time.sleep(1)
-
-        print(f"\n📊 **CONVERSATION SUMMARY**")
-        print("-" * 40)
-        summary = router.get_conversation_summary(session_id)
-        print(f"• Messages: {summary.get('message_count', 0)}")
-        print(f"• Topics: {', '.join(summary.get('recent_topics', []))}")
-        print(f"• Key Insights: {summary.get('key_insights', [])}")
+            else:
+                print("✅ *Test passed!*")
 
         print(f"\n🎯 **INTERACTIVE MODE**")
         print("Now you can continue the conversation...")
@@ -650,12 +789,40 @@ def interactive_chat_demo():
                 if user_input.lower() in ['quit', 'exit', 'bye']:
                     print("👋 Thanks for using Personal Finance Assistant!")
                     break
-                elif user_input.lower() == 'summary':
-                    summary = router.get_conversation_summary(session_id)
-                    print(f"\n📊 **Session Summary:**")
-                    for key, value in summary.items():
-                        if key != 'error':
-                            print(f"  • {key}: {value}")
+                elif user_input.lower() == 'test':
+                    # Quick test of individual agents
+                    print("\n🧪 **Testing Individual Agents**")
+                    
+                    # Test spending agent directly
+                    print("📊 Testing Spending Agent...")
+                    try:
+                        spending_result = router.spending_agent.process_query(
+                            client_id=client_id,
+                            user_query="How much did I spend last month?"
+                        )
+                        print(f"✅ Spending Agent: {spending_result['success']}")
+                        if spending_result['success']:
+                            print(f"📝 Response: {spending_result['response'][:100]}...")
+                        else:
+                            print(f"❌ Error: {spending_result.get('error', 'Unknown error')}")
+                    except Exception as e:
+                        print(f"❌ Spending Agent failed: {e}")
+                    
+                    # Test budget agent directly  
+                    print("\n💰 Testing Budget Agent...")
+                    try:
+                        budget_result = router.budget_agent.process_query(
+                            client_id=client_id,
+                            user_query="Create a $800 budget for groceries"
+                        )
+                        print(f"✅ Budget Agent: {budget_result['success']}")
+                        if budget_result['success']:
+                            print(f"📝 Response: {budget_result['response'][:100]}...")
+                        else:
+                            print(f"❌ Error: {budget_result.get('error', 'Unknown error')}")
+                    except Exception as e:
+                        print(f"❌ Budget Agent failed: {e}")
+                        
                     continue
                 elif not user_input:
                     continue
@@ -666,10 +833,30 @@ def interactive_chat_demo():
                     session_id=session_id
                 )
 
-                print(f"\n🤖 **{result['agent_used'].upper()} Agent**: {result['response']}")
+                # Enhanced response display with full routing information
+                agent_emoji = {
+                    'spending': '📊',
+                    'budget': '💰',
+                    'error': '❌',
+                    'unknown': '🤖'
+                }.get(result['agent_used'], '🤖')
                 
+                agent_name = result['agent_used'].title() + " Agent" if result['agent_used'] not in ['error', 'unknown'] else 'System'
+                
+                print(f"\n{agent_emoji} **{agent_name}**: {result['response']}")
+                
+                # Show detailed execution path
+                if result.get('execution_path'):
+                    path_display = ' → '.join(result['execution_path'])
+                    print(f"🛤️  *Execution Path: {path_display}*")
+                
+                # Show routing decision details
+                print(f"🎯 *Routing: {result.get('message_count', 0)} messages in conversation*")
+                
+                # Handle errors gracefully
                 if result.get('error'):
-                    print(f"❌ *Error: {result['error']}*")
+                    print(f"\n⚠️ *Technical note: {result['error']}*")
+                    print("💡 Try rephrasing your question or ask for help with 'help'")
 
             except KeyboardInterrupt:
                 print("\n👋 Chat interrupted. Goodbye!")
@@ -679,6 +866,23 @@ def interactive_chat_demo():
 
     except Exception as e:
         print(f"❌ Failed to initialize router: {e}")
+        print("💡 Trying individual agent tests...")
+        
+        # Try testing agents individually
+        try:
+            from agents.spendings_agent import SpendingAgent
+            print("🧪 Testing Spending Agent directly...")
+            spending_agent = SpendingAgent(
+                client_csv_path=client_csv,
+                overall_csv_path=overall_csv,
+                memory=False
+            )
+            result = spending_agent.process_query(430, "How much did I spend last month?")
+            print(f"✅ Spending Agent works: {result['success']}")
+            print(f"📝 Response: {result['response'][:100]}...")
+            
+        except Exception as e2:
+            print(f"❌ Spending Agent also failed: {e2}")
 
 
 if __name__ == "__main__":

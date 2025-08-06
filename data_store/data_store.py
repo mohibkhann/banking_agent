@@ -1007,7 +1007,7 @@ def generate_sql_for_benchmark_analysis(
     important_columns = {
         "date": "TEXT (YYYY-MM-DD) - Transaction date",
         "amount": "REAL - Transaction amount in dollars",
-        "mcc_category": "TEXT - Category",
+        "mcc_category": "TEXT - Category (use exact matches: 'Groceries', 'Restaurants', 'Transportation', etc.)",
         "current_age": "INTEGER - Customer age",
         "gender": "TEXT - Customer gender",
         "yearly_income": "REAL - Annual income",
@@ -1048,11 +1048,15 @@ Generate SQLite queries against overall_transactions.
 CRITICAL REQUIREMENTS:
 - Use the CURRENT DATE CONTEXT above for date filtering
 - NEVER use hardcoded years like 2023 - always use the current dates provided
+- For category comparisons, use exact category names like 'Groceries' (not 'grocery')
 - Aggregates: AVG(), COUNT(), SUM()
 - Group by: mcc_category, current_age, gender
 - Use Aliases in your query
 - Indexed columns: date, mcc_category, current_age, gender, amount
+- ENSURE PROPER SQL SYNTAX - no missing parentheses or incomplete clauses
 - RETURN ONLY THE SQL QUERY - no explanations or markdown
+
+EXAMPLE CATEGORY NAMES: 'Groceries', 'Restaurants', 'Transportation', 'Financial Services', 'Entertainment'
 
 Generate ONLY the SQL query for:
 """),
@@ -1080,6 +1084,10 @@ Generate ONLY the SQL query for:
         # Check for hardcoded 2023 dates and warn
         if "2023" in sql:
             print(f"⚠️ WARNING: Found hardcoded 2023 date in SQL: {sql}")
+
+        # Basic syntax validation
+        if sql.count("(") != sql.count(")"):
+            return {"error": f"SQL syntax error - mismatched parentheses: {sql}"}
 
         return {
             "sql_query": sql,

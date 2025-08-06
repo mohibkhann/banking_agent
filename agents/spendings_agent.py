@@ -10,9 +10,9 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.memory import MemorySaver
 # LangGraph imports
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 import os
 import sys
@@ -112,7 +112,7 @@ class SpendingAgent:
         ]
 
         # Setup memory (optional)
-        self.memory = SqliteSaver.from_conn_string(":memory:") if memory else None
+        self.memory = MemorySaver() if memory else None
 
         # Build the simplified graph
         self.graph = self._build_graph()
@@ -130,7 +130,7 @@ class SpendingAgent:
         workflow.add_node("response_generator", self._response_generator_node)  # Now works directly with SQL results
         workflow.add_node("error_handler", self._error_handler_node)
 
-        # Entry point
+        # Entry point - using string instead of START
         workflow.set_entry_point("intent_classifier")
 
         # Simplified routing
