@@ -1,0 +1,23 @@
+# Environment files
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Build / distribution
+build/
+dist/
+
+# Data dumps
+*.db
+*.sqlite
+*.csv
+
+# IDE settings
+.vscode/
+.idea/
+
+# Byte-compiled / optimized
+*.egg-info/
+*.egg
