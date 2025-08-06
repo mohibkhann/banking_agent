@@ -2,7 +2,7 @@ import os
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 
@@ -19,9 +19,8 @@ load_dotenv()
 
 class DataStore:
     """
-    Optimized DataStore that intelligently manages SQLite database creation
-    and CSV loading. Only loads CSV data when necessary (first run, database
-    missing, CSVs updated, or forced).
+    Enhanced DataStore with budget management capabilities.
+    Manages SQLite database with transaction data and budget tables.
     """
 
     def __init__(
@@ -51,6 +50,9 @@ class DataStore:
         else:
             print("✅ Using existing database (CSV loading skipped)")
             self._build_schema_info()
+
+        # Ensure budget tables exist (even if CSV loading was skipped)
+        self._ensure_budget_tables()
 
         logger.info("✅ DataStore ready for queries.")
 
@@ -166,6 +168,7 @@ class DataStore:
             self.conn.execute("DROP TABLE IF EXISTS client_transactions")
             self.conn.execute("DROP TABLE IF EXISTS overall_transactions")
             self.conn.execute("DROP TABLE IF EXISTS _database_metadata")
+            # Don't drop budget tables - they contain user data
             self.conn.commit()
 
             # Create & load
@@ -258,12 +261,80 @@ class DataStore:
             logger.error(f"❌ Failed to create tables/indexes: {e}")
             raise
 
+    def _ensure_budget_tables(self):
+        """Create budget-related tables if they don't exist."""
+        budget_tables_sql = [
+            """
+            CREATE TABLE IF NOT EXISTS user_budgets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                monthly_limit REAL NOT NULL,
+                budget_type TEXT DEFAULT 'fixed', -- 'percentage', 'fixed', 'goal_based'
+                created_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN DEFAULT 1,
+                UNIQUE(client_id, category, is_active)
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS budget_tracking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id INTEGER NOT NULL,
+                month TEXT NOT NULL, -- 'YYYY-MM'
+                category TEXT NOT NULL,
+                budgeted_amount REAL NOT NULL,
+                actual_amount REAL NOT NULL,
+                variance_amount REAL NOT NULL,
+                variance_percentage REAL NOT NULL,
+                created_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(client_id, month, category)
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS financial_goals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id INTEGER NOT NULL,
+                goal_type TEXT NOT NULL, -- 'savings', 'debt_payoff', 'emergency_fund'
+                goal_name TEXT NOT NULL,
+                target_amount REAL NOT NULL,
+                target_date TEXT,
+                monthly_contribution REAL,
+                current_progress REAL DEFAULT 0,
+                created_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN DEFAULT 1
+            );
+            """,
+            # Budget table indexes
+            "CREATE INDEX IF NOT EXISTS idx_budget_client ON user_budgets(client_id);",
+            "CREATE INDEX IF NOT EXISTS idx_budget_category ON user_budgets(category);",
+            "CREATE INDEX IF NOT EXISTS idx_tracking_client_month ON budget_tracking(client_id, month);",
+            "CREATE INDEX IF NOT EXISTS idx_goals_client ON financial_goals(client_id);",
+        ]
+
+        try:
+            for sql in budget_tables_sql:
+                self.conn.execute(sql)
+            self.conn.commit()
+            print("✅ Budget tables ensured")
+        except Exception as e:
+            logger.error(f"❌ Failed to create budget tables: {e}")
+            raise
+
     def _build_schema_info(self):
         """Build schema metadata for LLM-driven query generation."""
         common_cols = {
             "date": "TEXT (YYYY-MM-DD) – Transaction date",
-            "card_id": "INTEGER – Card identifier",
-            # … add the rest of the columns here …
+            "amount": "REAL – Transaction amount in dollars",
+            "mcc_category": "TEXT – Spending category (restaurants, grocery, etc.)",
+            "card_type": "TEXT – Type of card used",
+            "merchant_city": "TEXT – City where transaction occurred",
+            "is_weekend": "BOOLEAN – Weekend transaction flag",
+            "is_night_txn": "BOOLEAN – Night transaction flag",
+            "current_age": "INTEGER – Customer age",
+            "gender": "TEXT – Customer gender",
+            "yearly_income": "REAL – Annual income",
         }
 
         self.schema_info = {
@@ -275,18 +346,58 @@ class DataStore:
                     **common_cols,
                 },
                 "sample_queries": [
-                    "SELECT SUM(amount) FROM client_transactions "
-                    "WHERE client_id = 430 AND date >= '2023-01-01'",
-                    # …
+                    "SELECT SUM(amount) FROM client_transactions WHERE client_id = 430 AND date >= '2025-01-01'",
+                    "SELECT mcc_category, SUM(amount) FROM client_transactions WHERE client_id = 430 GROUP BY mcc_category",
                 ],
             },
             "overall_transactions": {
                 "description": "Market benchmark data",
                 "columns": common_cols,
                 "sample_queries": [
-                    "SELECT AVG(amount) FROM overall_transactions "
-                    "WHERE mcc_category = 'restaurants'",
-                    # …
+                    "SELECT AVG(amount) FROM overall_transactions WHERE mcc_category = 'restaurants'",
+                ],
+            },
+            "user_budgets": {
+                "description": "User-defined budget limits by category",
+                "columns": {
+                    "client_id": "INTEGER – Client identifier",
+                    "category": "TEXT – Budget category (matches mcc_category)",
+                    "monthly_limit": "REAL – Monthly budget limit in dollars",
+                    "budget_type": "TEXT – Type of budget (fixed, percentage, goal_based)",
+                    "is_active": "BOOLEAN – Whether budget is currently active",
+                },
+                "sample_queries": [
+                    "SELECT * FROM user_budgets WHERE client_id = 430 AND is_active = 1",
+                ],
+            },
+            "budget_tracking": {
+                "description": "Monthly budget vs actual spending tracking",
+                "columns": {
+                    "client_id": "INTEGER – Client identifier",
+                    "month": "TEXT – Month in YYYY-MM format",
+                    "category": "TEXT – Spending category",
+                    "budgeted_amount": "REAL – Budgeted amount for the month",
+                    "actual_amount": "REAL – Actual spending for the month",
+                    "variance_amount": "REAL – Difference (actual - budgeted)",
+                    "variance_percentage": "REAL – Percentage variance",
+                },
+                "sample_queries": [
+                    "SELECT * FROM budget_tracking WHERE client_id = 430 AND month = '2025-07'",
+                ],
+            },
+            "financial_goals": {
+                "description": "User financial goals and progress tracking",
+                "columns": {
+                    "client_id": "INTEGER – Client identifier",
+                    "goal_type": "TEXT – Type of goal (savings, debt_payoff, emergency_fund)",
+                    "goal_name": "TEXT – Name/description of the goal",
+                    "target_amount": "REAL – Target amount to achieve",
+                    "target_date": "TEXT – Target completion date",
+                    "current_progress": "REAL – Current progress toward goal",
+                    "monthly_contribution": "REAL – Required monthly contribution",
+                },
+                "sample_queries": [
+                    "SELECT * FROM financial_goals WHERE client_id = 430 AND is_active = 1",
                 ],
             },
         }
@@ -407,7 +518,7 @@ class DataStore:
             )
             metadata = [
                 ("status", "ready"),
-                ("version", "1.0"),
+                ("version", "1.1"),  # Updated version for budget support
                 ("last_loaded", datetime.now().isoformat()),
                 ("client_csv_path", self.client_csv_path),
                 ("overall_csv_path", self.overall_csv_path),
@@ -441,34 +552,35 @@ class DataStore:
             f"SELECT COUNT(*) FROM {table}"
         ).fetchone()[0]
 
-        # Date range
-        date_min, date_max = self.conn.execute(
-            f"SELECT MIN(date), MAX(date) FROM {table}"
-        ).fetchone()
-        stats["date_range"] = {"min": date_min, "max": date_max}
+        # Date range for transaction tables
+        if table in ("client_transactions", "overall_transactions"):
+            date_min, date_max = self.conn.execute(
+                f"SELECT MIN(date), MAX(date) FROM {table}"
+            ).fetchone()
+            stats["date_range"] = {"min": date_min, "max": date_max}
 
-        # Amount stats
-        total, avg, mn, mx = self.conn.execute(
-            f"SELECT SUM(amount), AVG(amount), MIN(amount), MAX(amount) FROM {table}"
-        ).fetchone()
-        stats["amount_stats"] = {
-            "total": total,
-            "average": round(avg, 2) if avg else 0,
-            "min": mn,
-            "max": mx,
-        }
+            # Amount stats
+            total, avg, mn, mx = self.conn.execute(
+                f"SELECT SUM(amount), AVG(amount), MIN(amount), MAX(amount) FROM {table}"
+            ).fetchone()
+            stats["amount_stats"] = {
+                "total": total,
+                "average": round(avg, 2) if avg else 0,
+                "min": mn,
+                "max": mx,
+            }
 
-        # Top categories
-        top = self.conn.execute(
-            f"""
-            SELECT mcc_category, COUNT(*) AS count
-            FROM {table}
-            GROUP BY mcc_category
-            ORDER BY count DESC
-            LIMIT 5
-            """
-        ).fetchall()
-        stats["top_categories"] = dict(top)
+            # Top categories
+            top = self.conn.execute(
+                f"""
+                SELECT mcc_category, COUNT(*) AS count
+                FROM {table}
+                GROUP BY mcc_category
+                ORDER BY count DESC
+                LIMIT 5
+                """
+            ).fetchall()
+            stats["top_categories"] = dict(top)
 
         return stats
 
@@ -485,14 +597,26 @@ class DataStore:
             if (datetime.now() - cached["timestamp"]).seconds < 300:
                 return cached["rows"], cached["columns"]
 
-        # Prevent data-changing statements
-        forbidden = {"DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "CREATE"}
-        if not is_select and any(word in sql.upper() for word in forbidden):
-            raise ValueError("Only SELECT queries allowed for analysis")
+        # Prevent data-changing statements on transaction tables (but allow budget table updates)
+        forbidden_on_transactions = {"DROP", "DELETE", "UPDATE", "ALTER", "CREATE"}
+        if not is_select:
+            # Allow INSERT/UPDATE/DELETE on budget tables
+            is_budget_operation = any(table in sql.upper() for table in 
+                                    ["USER_BUDGETS", "BUDGET_TRACKING", "FINANCIAL_GOALS"])
+            is_insert_or_update = any(op in sql.upper() for op in ["INSERT", "UPDATE", "DELETE"])
+            
+            if not is_budget_operation and any(word in sql.upper() for word in forbidden_on_transactions):
+                raise ValueError("Only SELECT queries allowed on transaction tables. Budget table modifications are allowed.")
+            elif not is_budget_operation and not is_insert_or_update:
+                raise ValueError("Only SELECT queries allowed on transaction tables")
 
         cur = self.conn.execute(sql, params)
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
+
+        # Commit for non-SELECT operations
+        if not is_select:
+            self.conn.commit()
 
         # Cache small SELECTs
         if is_select and not params and len(rows) < 1000:
@@ -503,6 +627,94 @@ class DataStore:
             }
 
         return rows, cols
+
+    # Budget-specific methods
+    def create_budget(self, client_id: int, category: str, monthly_limit: float, budget_type: str = "fixed") -> bool:
+        """Create or update a budget for a client."""
+        try:
+            # Deactivate existing budget for this category
+            self.conn.execute(
+                "UPDATE user_budgets SET is_active = 0 WHERE client_id = ? AND category = ?",
+                (client_id, category)
+            )
+            
+            # Insert new budget
+            self.conn.execute(
+                """
+                INSERT INTO user_budgets (client_id, category, monthly_limit, budget_type, created_date, is_active)
+                VALUES (?, ?, ?, ?, ?, 1)
+                """,
+                (client_id, category, monthly_limit, budget_type, datetime.now().isoformat())
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create budget: {e}")
+            return False
+
+    def get_client_budgets(self, client_id: int) -> pd.DataFrame:
+        """Get all active budgets for a client."""
+        rows, cols = self.execute_sql_query(
+            "SELECT * FROM user_budgets WHERE client_id = ? AND is_active = 1 ORDER BY category",
+            (client_id,)
+        )
+        return pd.DataFrame(rows, columns=cols)
+
+    def update_budget_tracking(self, client_id: int, month: str) -> bool:
+        """Update budget tracking for a specific month."""
+        try:
+            # Get active budgets
+            budgets = self.get_client_budgets(client_id)
+            if budgets.empty:
+                return False
+
+            # Calculate actual spending by category for the month
+            for _, budget in budgets.iterrows():
+                category = budget['category']
+                budgeted_amount = budget['monthly_limit']
+                
+                # Get actual spending
+                actual_rows, _ = self.execute_sql_query(
+                    """
+                    SELECT COALESCE(SUM(amount), 0) as actual_amount
+                    FROM client_transactions 
+                    WHERE client_id = ? AND mcc_category = ? 
+                    AND strftime('%Y-%m', date) = ?
+                    """,
+                    (client_id, category, month)
+                )
+                
+                actual_amount = actual_rows[0][0] if actual_rows else 0
+                variance_amount = actual_amount - budgeted_amount
+                variance_percentage = (variance_amount / budgeted_amount * 100) if budgeted_amount > 0 else 0
+                
+                # Insert or update tracking record
+                self.conn.execute(
+                    """
+                    INSERT OR REPLACE INTO budget_tracking 
+                    (client_id, month, category, budgeted_amount, actual_amount, variance_amount, variance_percentage)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (client_id, month, category, budgeted_amount, actual_amount, variance_amount, variance_percentage)
+                )
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update budget tracking: {e}")
+            return False
+
+    def get_budget_performance(self, client_id: int, month: str) -> pd.DataFrame:
+        """Get budget performance for a specific month."""
+        rows, cols = self.execute_sql_query(
+            """
+            SELECT * FROM budget_tracking 
+            WHERE client_id = ? AND month = ?
+            ORDER BY ABS(variance_percentage) DESC
+            """,
+            (client_id, month)
+        )
+        return pd.DataFrame(rows, columns=cols)
 
     def get_client_data(self, client_id: int) -> pd.DataFrame:
         """Get all data for a specific client."""
@@ -574,7 +786,7 @@ class DataStore:
         }
 
         try:
-            for table in ("client_transactions", "overall_transactions"):
+            for table in ("client_transactions", "overall_transactions", "user_budgets", "budget_tracking", "financial_goals"):
                 info["tables"][table] = self._get_table_stats(table)
 
             # Metadata
@@ -625,14 +837,11 @@ def _ensure_datastore() -> DataStore:
     global _datastore
     if _datastore is None:
         _datastore = DataStore(
-            client_csv_path=Path(__file__).parent
-            / "Banking_Data.csv",
-            overall_csv_path=Path(__file__).parent
-            / "overall_data.csv",
+            client_csv_path=Path(__file__).parent / "Banking_Data.csv",
+            overall_csv_path=Path(__file__).parent / "overall_data.csv",
             db_path="banking_data.db",
         )
     return _datastore
-
 
 
 from datetime import datetime, timedelta
@@ -654,7 +863,7 @@ def get_current_date_context() -> str:
     context = f"""
 CURRENT DATE CONTEXT:
 
-- Today’s date: {now.strftime("%Y-%m-%d")}
+- Today's date: {now.strftime("%Y-%m-%d")}
 - Current year: {now.year}
 - Current month: {now.strftime("%Y-%m")}
 - Last month: {last_month_start.strftime("%Y-%m-%d")} to {last_month_end.strftime("%Y-%m-%d")}
@@ -663,10 +872,10 @@ CURRENT DATE CONTEXT:
 
 WHEN USER SAYS:
 
-- “last month” → use dates {last_month_start.strftime("%Y-%m-%d")} to {last_month_end.strftime("%Y-%m-%d")}
-- “this month” → use dates {current_month_start.strftime("%Y-%m-%d")} to {now.strftime("%Y-%m-%d")}
-- “last year” → use dates {last_year_start.strftime("%Y-%m-%d")} to {last_year_end.strftime("%Y-%m-%d")}
-- “recent” or “lately” → use last 30 days: {(now - timedelta(days=30)).strftime("%Y-%m-%d")} to {now.strftime("%Y-%m-%d")}
+- "last month" → use dates {last_month_start.strftime("%Y-%m-%d")} to {last_month_end.strftime("%Y-%m-%d")}
+- "this month" → use dates {current_month_start.strftime("%Y-%m-%d")} to {now.strftime("%Y-%m-%d")}
+- "last year" → use dates {last_year_start.strftime("%Y-%m-%d")} to {last_year_end.strftime("%Y-%m-%d")}
+- "recent" or "lately" → use last 30 days: {(now - timedelta(days=30)).strftime("%Y-%m-%d")} to {now.strftime("%Y-%m-%d")}
 """
     return context
 
@@ -727,8 +936,8 @@ CRITICAL REQUIREMENTS:
 - RETURN ONLY THE SQL QUERY - no explanations or markdown
 
 EXAMPLES:
-- “last month spending” → WHERE date >= ‘YYYY-MM-DD’ AND date <= ‘YYYY-MM-DD’ (use last month dates from context)
-- “this year” → WHERE date >= ‘YYYY-01-01’ AND date <= ‘YYYY-MM-DD’ (current year)
+- "last month spending" → WHERE date >= 'YYYY-MM-DD' AND date <= 'YYYY-MM-DD' (use last month dates from context)
+- "this year" → WHERE date >= 'YYYY-01-01' AND date <= 'YYYY-MM-DD' (current year)
 
 Generate ONLY the SQL query for:
 """),
@@ -884,7 +1093,120 @@ Generate ONLY the SQL query for:
     except Exception as e:
         return {"error": f"Benchmark SQL generation failed: {e}"}
 
+@tool
+def generate_sql_for_budget_analysis(
+    user_query: str,
+    client_id: int,
+    analysis_type: str = "budget_performance"
+) -> Dict[str, Any]:
+    """
+    Generate optimized SQL for budget-related queries.
+    """
+    ds = _ensure_datastore()
+    
+    # Get current date context
+    date_context = get_current_date_context()
+    
+    # Get schema info for budget tables
+    budget_schema = ds.get_schema_info().get("user_budgets", {})
+    tracking_schema = ds.get_schema_info().get("budget_tracking", {})
+    
+    # Build comprehensive schema description
+    schema_desc = f"""
+BUDGET ANALYSIS TABLES:
 
+USER_BUDGETS TABLE:
+- client_id: INTEGER - Client identifier (ALWAYS required)
+- category: TEXT - Budget category (matches mcc_category from transactions)
+- monthly_limit: REAL - Monthly budget limit in dollars
+- budget_type: TEXT - Type of budget (fixed, percentage, goal_based)
+- is_active: BOOLEAN - Whether budget is currently active (use = 1)
+
+BUDGET_TRACKING TABLE:
+- client_id: INTEGER - Client identifier (ALWAYS required)
+- month: TEXT - Month in YYYY-MM format
+- category: TEXT - Spending category
+- budgeted_amount: REAL - Budgeted amount for the month
+- actual_amount: REAL - Actual spending for the month
+- variance_amount: REAL - Difference (actual - budgeted)
+- variance_percentage: REAL - Percentage variance
+
+CLIENT_TRANSACTIONS TABLE (for real-time calculations):
+- client_id: INTEGER - Client identifier
+- date: TEXT (YYYY-MM-DD) - Transaction date
+- amount: REAL - Transaction amount
+- mcc_category: TEXT - Spending category
+"""
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", f"""
+You are an expert SQL generator for budget analysis queries.
+Generate efficient SQLite queries for budget management.
+
+{date_context}
+
+{schema_desc}
+
+ANALYSIS TYPES:
+- "budget_performance": Compare budgeted vs actual spending
+- "budget_status": Current budget limits and categories
+- "budget_variance": Identify over/under spending
+- "budget_trends": Historical budget performance
+
+CRITICAL REQUIREMENTS:
+- ALWAYS include WHERE client_id = {client_id}
+- Use CURRENT DATE CONTEXT for date filtering
+- For current month analysis, use strftime('%Y-%m', date) for month comparison
+- Join tables when needed for comprehensive analysis
+- Use meaningful aliases
+- RETURN ONLY THE SQL QUERY - no explanations
+
+COMMON PATTERNS:
+- Current month spending: WHERE strftime('%Y-%m', date) = strftime('%Y-%m', 'now')
+- Budget vs actual: JOIN user_budgets with aggregated client_transactions
+- Variance calculation: (actual_amount - budgeted_amount) AS variance
+
+Generate ONLY the SQL query for:
+"""),
+        ("human", "{user_query}")
+    ])
+
+    try:
+        llm = ChatOpenAI(model="gpt-4o", temperature=0)
+        resp = llm.invoke(prompt.format_messages(user_query=user_query))
+        sql = resp.content.strip()
+
+        # Clean up SQL
+        lines = [l.strip() for l in sql.splitlines()]
+        sql_lines, found = [], False
+        for line in lines:
+            if line.upper().startswith("SELECT") or found:
+                found = True
+                sql_lines.append(line)
+        sql = "\n".join(sql_lines).strip("```sql ").strip("```")
+
+        # Fallback extraction
+        if not sql.upper().startswith("SELECT"):
+            idx = resp.content.upper().find("SELECT")
+            if idx >= 0:
+                sql = resp.content[idx:].split("\n\n")[0].strip()
+
+        # Validate client_id presence
+        if f"client_id = {client_id}" not in sql:
+            return {"error": f"Missing client_id filter in budget query: {sql}"}
+
+        return {
+            "sql_query": sql,
+            "query_type": "budget_analysis",
+            "analysis_type": analysis_type,
+            "client_id": client_id,
+            "original_query": user_query,
+            "optimization_used": "budget table indexes",
+            "date_context_applied": True
+        }
+
+    except Exception as e:
+        return {"error": f"Budget SQL generation failed: {e}"}
 
 @tool
 def execute_generated_sql(
@@ -928,3 +1250,82 @@ def execute_generated_sql(
             "execution_timestamp": datetime.now().isoformat()
         }
 
+@tool 
+def create_or_update_budget(
+    client_id: int,
+    category: str,
+    monthly_limit: float,
+    budget_type: str = "fixed"
+) -> Dict[str, Any]:
+    """
+    Create or update a budget for a specific client and category.
+    """
+    ds = _ensure_datastore()
+    
+    try:
+        success = ds.create_budget(client_id, category, monthly_limit, budget_type)
+        
+        if success:
+            return {
+                "success": True,
+                "message": f"Budget created/updated: {category} = ${monthly_limit:.2f}/month",
+                "client_id": client_id,
+                "category": category,
+                "monthly_limit": monthly_limit,
+                "budget_type": budget_type
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to create/update budget",
+                "client_id": client_id,
+                "category": category
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Budget operation failed: {e}",
+            "client_id": client_id,
+            "category": category
+        }
+
+@tool
+def update_budget_tracking_for_month(
+    client_id: int,
+    month: str
+) -> Dict[str, Any]:
+    """
+    Update budget tracking calculations for a specific client and month.
+    Format: month should be 'YYYY-MM' (e.g., '2025-07')
+    """
+    ds = _ensure_datastore()
+    
+    try:
+        success = ds.update_budget_tracking(client_id, month)
+        
+        if success:
+            # Get the updated tracking data
+            performance_df = ds.get_budget_performance(client_id, month)
+            
+            return {
+                "success": True,
+                "message": f"Budget tracking updated for {month}",
+                "client_id": client_id,
+                "month": month,
+                "categories_tracked": len(performance_df),
+                "tracking_data": performance_df.to_dict('records') if not performance_df.empty else []
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to update budget tracking - no active budgets found",
+                "client_id": client_id,
+                "month": month
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Budget tracking update failed: {e}",
+            "client_id": client_id,
+            "month": month
+        }
