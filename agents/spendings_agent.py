@@ -10,9 +10,9 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 # LangGraph imports
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 import os
 import sys
@@ -28,12 +28,18 @@ sys.path.insert(
 )
 
 # Import the updated DataStore and SQL tools
-from data_store.data_store import (
+from banking_agent.data_store.data_store import (
 DataStore,
 generate_sql_for_client_analysis,
 generate_sql_for_benchmark_analysis,
 execute_generated_sql
 )
+# from data_store.data_store import (
+#     DataStore,
+#     execute_generated_sql,
+#     generate_sql_for_benchmark_analysis,
+#     generate_sql_for_client_analysis,
+# )
 
 load_dotenv()
 
@@ -54,6 +60,9 @@ class IntentClassification(BaseModel):
     query_focus: str = Field(
         description="Main focus: spending_summary, category_analysis, time_patterns, or comparison"
     )
+    is_finance_query: bool = Field(
+        description="False if the query is outside banking/spending domain")
+
     time_period: str = Field(
         description="Time scope: last_month, last_quarter, last_year, specific_dates, or all_time"
     )
@@ -70,6 +79,7 @@ class SpendingAgentState(TypedDict):
     intent: Optional[Dict[str, Any]]
     sql_queries: Optional[List[Dict[str, Any]]]
     raw_data: Optional[List[Dict[str, Any]]]
+    analysis_result: Optional[List[Dict[str, Any]]]
     response: Optional[str]
     messages: Annotated[List[BaseMessage], operator.add]
     error: Optional[str]
@@ -78,7 +88,7 @@ class SpendingAgentState(TypedDict):
 
 
 class SpendingAgent:
-    """Simplified SQL-first LangGraph-based Spending Agent that passes raw SQL results directly to LLM"""
+    """SQL-first LangGraph-based Spending Agent with structured output parsing"""
 
     def __init__(
         self,
@@ -111,29 +121,30 @@ class SpendingAgent:
             execute_generated_sql,
         ]
 
-        # Setup memory (optional)
-        self.memory = MemorySaver() if memory else None
+        # Setup memory 
+        self.memory = SqliteSaver.from_conn_string(":memory:") if memory else None
 
-        # Build the simplified graph
+        # Build the enhanced graph
         self.graph = self._build_graph()
         print("✅ SpendingAgent initialized with SQL-first capabilities!")
 
     def _build_graph(self) -> StateGraph:
-        """Build the simplified SQL-first LangGraph workflow"""
+        """Build the SQL-first LangGraph workflow"""
 
         workflow = StateGraph(SpendingAgentState)
 
-        # Simplified workflow nodes - removed data_analyzer
+        # Enhanced workflow nodes
         workflow.add_node("intent_classifier", self._intent_classifier_node)
         workflow.add_node("sql_generator", self._sql_generator_node)
         workflow.add_node("sql_executor", self._sql_executor_node)
-        workflow.add_node("response_generator", self._response_generator_node)  # Now works directly with SQL results
+        workflow.add_node("data_analyzer", self._data_analyzer_node)
+        workflow.add_node("response_generator", self._response_generator_node)
         workflow.add_node("error_handler", self._error_handler_node)
 
-        # Entry point - using string instead of START
+        # Entry point
         workflow.set_entry_point("intent_classifier")
 
-        # Simplified routing
+        # Enhanced routing with better error handling
         workflow.add_conditional_edges(
             "intent_classifier",
             self._route_after_intent,
@@ -141,7 +152,8 @@ class SpendingAgent:
         )
 
         workflow.add_edge("sql_generator", "sql_executor")
-        workflow.add_edge("sql_executor", "response_generator")  # Direct path
+        workflow.add_edge("sql_executor", "data_analyzer")
+        workflow.add_edge("data_analyzer", "response_generator")
         workflow.add_edge("response_generator", END)
         workflow.add_edge("error_handler", END)
 
@@ -183,6 +195,9 @@ Analyze the user's query and determine:
 - "last_year": Annual analysis
 - "all_time": Full historical analysis
 - "specific_dates": User specified date range
+
+5. is_finance_query: true if this question is about personal or comparative spending/banking;
+    otherwise false.
 
 {format_instructions}
 
@@ -374,6 +389,8 @@ Analyze this query and provide structured classification:""",
             state["execution_path"].append("sql_generator")
 
             print(f"✅ Generated {len(sql_queries)} SQL queries successfully")
+            print(json.dumps([q["sql_query"] for q in sql_queries], indent=2))
+
 
         except Exception as e:
             state["error"] = f"SQL generation failed: {e}"
@@ -411,14 +428,13 @@ Analyze this query and provide structured classification:""",
                         print(f" ❌ Query {i+1} failed: {execution_result['error']}")
                         continue
 
-                    # Store successful result with more context
+                    # Store successful result
                     raw_data.append(
                         {
                             "query_type": query_info.get("query_type"),
                             "original_query": query_info.get("original_query"),
                             "sql_executed": query_info["sql_query"],
                             "results": execution_result.get("results", []),
-                            "column_names": execution_result.get("column_names", []),
                             "row_count": execution_result.get("row_count", 0),
                             "execution_time": execution_result.get(
                                 "execution_time_seconds", 0
@@ -442,14 +458,8 @@ Analyze this query and provide structured classification:""",
 
             print(f"✅ Successfully executed {len(raw_data)} queries")
 
-            # Debug: Show actual SQL results
-            for i, data_chunk in enumerate(raw_data):
-                print(f"🔍 [DEBUG] Results for query {i+1}:")
-                print(f"  SQL: {data_chunk['sql_executed']}")
-                print(f"  Columns: {data_chunk['column_names']}")
-                print(f"  Rows: {len(data_chunk['results'])}")
-                if data_chunk['results']:
-                    print(f"  Sample result: {data_chunk['results'][0]}")
+            print(f"🔍 [DEBUG] Results for query {i+1}:")
+            print(json.dumps(raw_data[-1], indent=2, default=str))
 
         except Exception as e:
             state["error"] = f"SQL execution failed: {e}"
@@ -457,88 +467,291 @@ Analyze this query and provide structured classification:""",
 
         return state
 
+    def _data_analyzer_node(self, state: SpendingAgentState) -> SpendingAgentState:
+        """Analyze raw SQL results using local processing"""
+
+        try:
+            print("📊 [DEBUG] Analyzing raw data...")
+
+            raw_data = state.get("raw_data", [])
+            analysis_results = []
+
+            for data_chunk in raw_data:
+                query_type = data_chunk.get("query_type")
+                results = data_chunk.get("results", [])
+
+                if not results:
+                    print(f" ⚠️ No results for {query_type}")
+                    continue
+
+                try:
+                    # Convert to DataFrame for analysis
+                    df = pd.DataFrame(results)
+                    print(f" 📈 Analyzing {len(df)} rows for {query_type}")
+
+                    if query_type == "client_analysis":
+                        personal_analysis = self._analyze_personal_spending(df, state)
+                        analysis_results.append(
+                            {"type": "personal_analysis", "data": personal_analysis}
+                        )
+
+                    elif query_type == "benchmark_analysis":
+                        benchmark_analysis = self._analyze_benchmark_data(df, state)
+                        analysis_results.append(
+                            {"type": "benchmark_analysis", "data": benchmark_analysis}
+                        )
+
+                except Exception as analysis_error:
+                    print(f" ❌ Analysis error for {query_type}: {analysis_error}")
+                    # Continue with other analyses
+                    continue
+
+            if not analysis_results:
+                # Create minimal analysis from raw data
+                analysis_results = [
+                    {
+                        "type": "basic_analysis",
+                        "data": {
+                            "raw_data_summary": f"Retrieved {len(raw_data)} data chunks"
+                        },
+                    }
+                ]
+
+            state["analysis_result"] = analysis_results
+            state["execution_path"].append("data_analyzer")
+
+            print(f"This is the analysis result {state["analysis_result"]}")
+
+            print(f"✅ Completed analysis: {len(analysis_results)} result sets")
+
+        except Exception as e:
+            state["error"] = f"Data analysis failed: {e}"
+            print(f"❌ Analysis error: {e}")
+
+        return state
+
+    def _analyze_personal_spending(
+        self, df: pd.DataFrame, state: SpendingAgentState
+    ) -> Dict[str, Any]:
+        """Analyze personal spending data with safe calculations and rich insights"""
+
+        if df.empty:
+            return {"error": "No personal spending data available"}
+
+        analysis = {}
+
+        try:
+            print(f" [DEBUG] Analyzing {len(df)} rows of client data")
+            print(f" [DEBUG] Columns available: {list(df.columns)}")
+            print(
+                f" [DEBUG] Sample data: {df.head(1).to_dict('records') if not df.empty else 'None'}"
+            )
+
+            # Basic spending metrics
+            if "amount" in df.columns:
+                amounts = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
+
+                analysis["spending_summary"] = {
+                    "total_amount": float(amounts.sum()),
+                    "transaction_count": len(df),
+                    "average_transaction": float(amounts.mean())
+                    if len(amounts) > 0
+                    else 0,
+                    "median_transaction": float(amounts.median())
+                    if len(amounts) > 0
+                    else 0,
+                    "max_transaction": float(amounts.max()) if len(amounts) > 0 else 0,
+                    "min_transaction": float(amounts.min()) if len(amounts) > 0 else 0,
+                }
+
+                print(
+                    f" [DEBUG] Spending summary: ${amounts.sum():.2f} total, {len(df)} transactions"
+                )
+
+            # Category breakdown if available
+            if "mcc_category" in df.columns and "amount" in df.columns:
+                try:
+                    amounts = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
+                    df_with_amounts = df.copy()
+                    df_with_amounts["amount"] = amounts
+
+                    category_analysis = (
+                        df_with_amounts.groupby("mcc_category")["amount"]
+                        .agg(["sum", "count", "mean"])
+                        .round(2)
+                    )
+                    category_analysis = category_analysis.sort_values(
+                        "sum", ascending=False
+                    )
+
+                    # Convert to dict format that's easy for LLM to understand
+                    category_breakdown = {}
+                    for category in category_analysis.index:
+                        category_breakdown[category] = {
+                            "total_spent": float(category_analysis.loc[category, "sum"]),
+                            "transaction_count": int(
+                                category_analysis.loc[category, "count"]
+                            ),
+                            "average_per_transaction": float(
+                                category_analysis.loc[category, "mean"]
+                            ),
+                        }
+
+                    analysis["category_breakdown"] = {
+                        "categories": category_breakdown,
+                        "top_category": category_analysis.index[0]
+                        if len(category_analysis) > 0
+                        else "Unknown",
+                        "total_categories": len(category_analysis),
+                    }
+
+                    print(
+                        f" [DEBUG] Found {len(category_analysis)} categories, top: {category_analysis.index[0] if len(category_analysis) > 0 else 'None'}"
+                    )
+
+                except Exception as cat_error:
+                    print(f" ⚠️ Category analysis error: {cat_error}")
+
+            # Add raw data sample for LLM context
+            if not df.empty:
+                # Get a sample of actual transactions for context
+                sample_size = min(5, len(df))
+                sample_data = df.head(sample_size)
+
+                analysis["sample_transactions"] = []
+                for _, row in sample_data.iterrows():
+                    transaction = {}
+                    for col in ["date", "amount", "mcc_category", "merchant_city"]:
+                        if col in row:
+                            transaction[col] = row[col]
+                    analysis["sample_transactions"].append(transaction)
+
+        except Exception as e:
+            analysis["error"] = f"Personal analysis error: {e}"
+            print(f" ❌ Analysis error: {e}")
+
+        return analysis
+
+    def _analyze_benchmark_data(
+        self, df: pd.DataFrame, state: SpendingAgentState
+    ) -> Dict[str, Any]:
+        """Analyze benchmark data with safe calculations"""
+
+        if df.empty:
+            return {"error": "No benchmark data available"}
+
+        analysis = {}
+
+        try:
+            # Market averages
+            if "amount" in df.columns:
+                amounts = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
+                analysis["market_benchmarks"] = {
+                    "market_average": float(amounts.mean()) if len(amounts) > 0 else 0,
+                    "market_median": float(amounts.median()) if len(amounts) > 0 else 0,
+                    "sample_size": len(df),
+                }
+
+            # Demographic breakdowns if available
+            if "current_age" in df.columns and "amount" in df.columns:
+                try:
+                    amounts = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
+                    df_with_amounts = df.copy()
+                    df_with_amounts["amount"] = amounts
+
+                    age_analysis = (
+                        df_with_amounts.groupby("current_age")["amount"].mean().to_dict()
+                    )
+                    analysis["demographic_patterns"] = {
+                        "spending_by_age": {
+                            str(k): float(v) for k, v in age_analysis.items()
+                        }
+                    }
+                except Exception as demo_error:
+                    print(f" ⚠️ Demographic analysis error: {demo_error}")
+
+        except Exception as e:
+            analysis["error"] = f"Benchmark analysis error: {e}"
+
+        return analysis
+
     def _response_generator_node(self, state: SpendingAgentState) -> SpendingAgentState:
-        """Generate response directly from SQL results without intermediate analysis"""
+        """Generate comprehensive response with actual data insights"""
 
         response_prompt = ChatPromptTemplate.from_messages(
             [
                 (
                     "system",
-                    """You are a helpful personal finance assistant analyzing the user's spending data.
+                    """You are an expert financial advisor analyzing real banking transaction data.
 
 The user asked: "{user_query}"
 
-You have access to their real transaction data and need to provide a natural, conversational response. Your job is to:
+You have successfully retrieved and analyzed their actual spending data. The analysis results contain REAL numbers and transactions from their account.
 
-1. **Answer directly and naturally** - Don't mention SQL queries, databases, or technical details
-2. **Use the actual numbers** from the data provided
-3. **Be conversational and helpful** - Sound like a knowledgeable friend, not a robot
-4. **Provide insights when possible** - Point out interesting patterns or provide context
-5. **Be accurate** - Only use the real data provided, never make up numbers
+Your job is to:
+1. **Use the specific numbers** from the analysis results
+2. **Answer their exact question** with real data
+3. **Provide actionable insights** based on the actual spending patterns
+4. **Be specific and helpful** - use actual amounts, categories, and transaction counts
 
-**Response Style:**
-- Start directly with the answer (e.g., "You spent $1,234 last month")
-- Use natural language, not technical jargon
-- Provide helpful context or insights when relevant
-- Be concise but informative
-- Never mention "SQL queries", "database results", or technical processes
+NEVER say "the data provided doesn't include" or give generic advice. The analysis contains REAL transaction data that you should analyze and present clearly.
 
 Analysis Type: {analysis_type}""",
                 ),
                 (
                     "human",
-                    """Here is the user's actual spending data:
+                    """Based on this REAL analysis of the user's actual spending data:
 
-{sql_results}
+{results}
 
-Please answer their question naturally: "{user_query}"
+Please provide a specific, data-driven response to their question: "{user_query}"
 
-Remember: Give a direct, conversational answer using only the real data shown above.""",
+Focus on the actual numbers and patterns in their spending data.""",
                 ),
             ]
         )
 
         try:
-            raw_data = state.get("raw_data", [])
+            results = state.get("analysis_result", [])
 
-            if not raw_data:
-                state["response"] = "I wasn't able to find any spending data for your query. Please try rephrasing your question."
-                state["execution_path"].append("response_generator")
-                return state
+            # Ensure we have something to work with
+            if not results:
+                results = [
+                    {
+                        "type": "basic",
+                        "data": {
+                            "message": "Analysis completed but limited data available"
+                        },
+                    }
+                ]
 
-            # Extract just the essential data for the LLM (cleaner format)
-            clean_results = []
-            
-            for data_chunk in raw_data:
-                results = data_chunk.get("results", [])
-                if results:
-                    clean_results.extend(results)
+            # Convert to JSON string safely
+            try:
+                results_json = json.dumps(results, indent=2, default=str)
+            except Exception as json_error:
+                results_json = str(results)
 
-            # Convert to a simple, clean format
-            if len(clean_results) == 1 and len(clean_results[0]) == 1:
-                # Single value result - just pass the key-value pair
-                key, value = list(clean_results[0].items())[0]
-                results_text = f"{key}: {value}"
-            else:
-                # Multiple results - format as clean JSON
-                results_text = json.dumps(clean_results, indent=2, default=str)
-
-            print(f" [DEBUG] Sending clean data to LLM:")
-            print(f" - Results format: {type(results_text)}")
-            print(f" - Sample: {results_text[:200]}...")
+            print(f" [DEBUG] Sending to LLM: {len(results)} analysis results")
+            print(
+                f" [DEBUG] Sample result: {str(results[0])[:200]}..."
+                if results
+                else "No results"
+            )
 
             response = self.llm.invoke(
                 response_prompt.format_messages(
                     analysis_type=state.get("analysis_type", "personal"),
                     user_query=state["user_query"],
-                    sql_results=results_text,
+                    results=results_json,
                 )
             )
 
             state["response"] = response.content
             state["execution_path"].append("response_generator")
 
-            print(f" [DEBUG] Generated response length: {len(response.content)} characters")
+            print(
+                f" [DEBUG] Generated response length: {len(response.content)} characters"
+            )
 
         except Exception as e:
             print(f"❌ Response generation error: {e}")
@@ -552,35 +765,45 @@ Remember: Give a direct, conversational answer using only the real data shown ab
         """Generate a fallback response when main response generation fails"""
 
         try:
-            raw_data = state.get("raw_data", [])
+            analysis_results = state.get("analysis_result", [])
 
-            if not raw_data:
-                return f"I processed your query '{state['user_query']}' but couldn't retrieve any data. Please try a different question."
-
+            # Extract basic info from analysis results
             response_parts = [f"I analyzed your query: '{state['user_query']}'"]
 
-            for data_chunk in raw_data:
-                results = data_chunk.get("results", [])
-                if results:
-                    # Try to extract basic information from first result
-                    first_result = results[0]
-                    
-                    # Look for common spending-related fields
-                    for key, value in first_result.items():
-                        if key.lower().startswith('total'):
-                            response_parts.append(f"{key.replace('_', ' ').title()}: ${value:,.2f}")
-                        elif 'amount' in key.lower():
-                            response_parts.append(f"{key.replace('_', ' ').title()}: ${value:,.2f}")
-                        elif 'count' in key.lower():
-                            response_parts.append(f"{key.replace('_', ' ').title()}: {value}")
+            for result in analysis_results:
+                if result.get("type") == "personal_analysis":
+                    data = result.get("data", {})
+                    if "spending_summary" in data:
+                        summary = data["spending_summary"]
+                        total = summary.get("total_amount", 0)
+                        count = summary.get("transaction_count", 0)
+                        avg = summary.get("average_transaction", 0)
+
+                        response_parts.append(
+                            f"Found {count} transactions totaling ${total:,.2f}"
+                        )
+                        if avg > 0:
+                            response_parts.append(f"Average transaction: ${avg:.2f}")
+
+                    if "category_breakdown" in data:
+                        categories = data["category_breakdown"].get("categories", {})
+                        if categories:
+                            top_category = max(
+                                categories.items(), key=lambda x: x[1]["total_spent"]
+                            )
+                            response_parts.append(
+                                f"Top spending category: {top_category[0]} (${top_category[1]['total_spent']:,.2f})"
+                            )
 
             if len(response_parts) == 1:
-                response_parts.append("The query executed successfully but returned limited information.")
+                response_parts.append(
+                    "The analysis completed successfully. You can try asking more specific questions about your spending patterns."
+                )
 
             return "\n\n".join(response_parts)
 
         except Exception:
-            return f"I processed your query '{state['user_query']}' and retrieved some data. Please try asking more specific questions about your spending patterns."
+            return f"I processed your query '{state['user_query']}' and found some spending data. Please try asking more specific questions about your spending patterns."
 
     def _error_handler_node(self, state: SpendingAgentState) -> SpendingAgentState:
         """Enhanced error handling with helpful suggestions"""
@@ -616,6 +839,12 @@ I have access to your transaction data and can help with various spending analys
 
         if state.get("error"):
             return "error"
+        
+
+        intent = state.get("intent", {})
+        if not intent.get("is_finance_query", True):
+            state["error"] = "Out of domain: non-finance question"
+            return "error_handler"
 
         intent = state.get("intent")
         if not intent:
@@ -662,6 +891,7 @@ I have access to your transaction data and can help with various spending analys
             intent=None,
             sql_queries=None,
             raw_data=None,
+            analysis_result=None,
             response=None,
             messages=[HumanMessage(content=user_query)],
             error=None,
@@ -697,9 +927,9 @@ I have access to your transaction data and can help with various spending analys
 
 
 def test_full_spending_agent():
-    """Test the complete SpendingAgent workflow with various queries"""
+    """Test the complete SpendingAgent workflow"""
 
-    print("🧪 TESTING SIMPLIFIED SPENDING AGENT WORKFLOW")
+    print("🧪 TESTING COMPLETE SPENDING AGENT WORKFLOW")
     print("=" * 60)
 
     client_csv = "/Users/mohibalikhan/Desktop/banking-agent/banking_agent/Banking_Data.csv"
@@ -711,11 +941,8 @@ def test_full_spending_agent():
         agent = SpendingAgent(
             client_csv_path=client_csv, overall_csv_path=overall_csv, memory=False
         )
-        
         test_queries = [
-            "How much did I spend last month?",
-            "Show me my spending by category last month",
-            "What's my average transaction amount?"
+            "How much did I spend last month?"
         ]
 
         for query in test_queries:
@@ -728,6 +955,7 @@ def test_full_spending_agent():
                 print(f"✅ Success: {result.get('success', False)}")
                 print(f"📊 Analysis Type: {result.get('analysis_type', 'N/A')}")
                 print(f"🔧 SQL Queries: {result.get('sql_queries', 0)}")
+
 
                 # Show the actual response
                 response = result.get("response", "No response")
@@ -746,6 +974,12 @@ def test_full_spending_agent():
         print(f"❌ Failed to initialize agent: {e}")
 
 
+
+            
+
 if __name__ == "__main__":
+
     print("\n" + "=" * 60)
+
+    # Then test the full agent
     test_full_spending_agent()

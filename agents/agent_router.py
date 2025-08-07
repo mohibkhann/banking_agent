@@ -101,9 +101,9 @@ class PersonalFinanceRouter:
         enable_memory: bool = True,
         memory_db_path: str = "conversation_memory.db"
     ):
-        print(f"🤖 Initializing PersonalFinanceRouter...")
-        print(f"📊 Data sources: Client CSV, Overall CSV")
-        print(f"🧠 Memory enabled: {enable_memory}")
+        print(f"Initializing PersonalFinanceRouter...")
+        print(f"Data sources: Client CSV, Overall CSV")
+        print(f"Memory enabled: {enable_memory}")
 
         # Initialize agents
         print("🔄 Loading Spending Agent...")
@@ -341,12 +341,13 @@ ROUTING RULES:
 1. If user asks about spending/transactions → SPENDING AGENT
 2. If user asks about budgets/budget creation → BUDGET AGENT  
 3. For follow-ups or vague queries → use CONTEXT (last agent or topic)
-4. Simple responses like "ok please show", "yes", "tell me more" → use LAST AGENT + TOPIC CONTEXT
+4. When user asks something irrelevant to finance, budgeting or spendings reply with only irrelevant
+5. Simple responses like "ok please show", "yes", "tell me more" → use LAST AGENT + TOPIC CONTEXT
 
 Query to analyze: "{query_for_routing}"
 Original user input: "{original_query}"
 
-Respond with just the agent name: "spending" or "budget"
+Respond with just the agent name: "spending" or "budget" or "irrelevant"
 """
                 ),
                 (
@@ -372,6 +373,12 @@ Respond with just the agent name: "spending" or "budget"
                 elif "budget" in response_text:
                     primary_agent = "budget"
                     reasoning = "Query contains budget-related content or context"
+
+                elif "irrelevant" in response_text:
+                    primary_agent = "irrelevant"
+                    reasoning = "Query is irrelevant to my domain"
+
+        
                 else:
                     # Enhanced fallback logic
                     primary_agent, reasoning = self._enhanced_fallback_routing(
@@ -567,6 +574,8 @@ Respond with just the agent name: "spending" or "budget"
                     suggestion = "\n\n📈 *I can provide more detailed spending breakdowns to help fine-tune your budget.*"
                 elif context and context.message_count <= 2:
                     suggestion = "\n\n🎯 *I can also analyze your historical spending patterns to suggest better budget allocations.*"
+            elif agent_used == "irrelevant":
+                suggestion = "\n\n📈 *I can not provide an answer to that, please ask me about your spendings or if you need any help with budgeting*"
 
             state["final_response"] += suggestion
 
@@ -623,7 +632,7 @@ Respond with just the agent name: "spending" or "budget"
 
         state["final_response"] = f"""I encountered an issue processing your request: {error_message}
 
-🤖 **I can help you with:**
+**I can help you with:**
 - 📊 **Spending Analysis**: "How much did I spend last month?"
 - 💰 **Budget Management**: "Create a $500 budget for groceries"
 - 📈 **Comparisons**: "How do I compare to others?"
@@ -650,6 +659,7 @@ Please try rephrasing your question, and I'll route it to the right specialist!"
             return "spending"
         elif primary_agent == "budget":
             return "budget"
+        
         else:
             state["error"] = f"Unknown agent: {primary_agent}"
             return "error"

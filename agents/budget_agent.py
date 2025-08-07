@@ -244,6 +244,8 @@ Analyze this budget query and provide structured classification:""",
     def _fallback_budget_classification(self, user_query: str) -> Dict[str, Any]:
         """Fallback budget intent classification using keywords"""
 
+        print("Going for fallback")
+
         query_lower = user_query.lower()
 
         # Budget-specific keyword classification
@@ -264,7 +266,7 @@ Analyze this budget query and provide structured classification:""",
             query_focus = "optimization"
             requires_budget_update = False
         else:
-            analysis_type = "budget_tracking"  # Default
+            analysis_type = "budget_tracking"  # 
             query_focus = "performance_review"
             requires_budget_update = False
 
@@ -355,13 +357,13 @@ Analyze this budget query and provide structured classification:""",
 
         return state
 
-    def _extract_budget_creation_params(self, user_query: str) -> Optional[Dict[str, Any]]:
+    def _extract_budget_creation_params(self, user_query: str) -> Optional[Dict[str, Any]]: #(to be changed)
         """Extract budget creation parameters from user query"""
         
         # This is a simple extraction - in production, you'd use more sophisticated NLP
         query_lower = user_query.lower()
         
-        # Look for budget amounts
+        # Look for budget amounts, it is searching for Dollar sign $
         import re
         amount_match = re.search(r'\$?(\d+(?:,\d{3})*(?:\.\d{2})?)', user_query)
         
@@ -390,7 +392,7 @@ Analyze this budget query and provide structured classification:""",
         """Execute budget queries and operations"""
 
         try:
-            print("⚡ [DEBUG] Executing budget queries and operations...")
+            print("⚡ [DEBUG] (Budget Executor Node) Executing budget queries and operations...")
 
             raw_data = []
             
@@ -504,7 +506,7 @@ Analyze this budget query and provide structured classification:""",
             [
                 (
                     "system",
-                    """You are a helpful personal budget advisor analyzing the user's financial data.
+                    """You are a helpful personal bank's budget advisor analyzing the user's financial data.
 
 The user asked: "{user_query}"
 
@@ -520,6 +522,7 @@ You have access to their real budget and spending data. Your job is to:
 - Start directly with the answer or insight
 - Use natural, conversational language
 - Give specific recommendations when possible
+- Act as an emplyee of bank
 - Highlight both successes and areas for improvement
 - Never mention technical details like "SQL" or "database"
 
@@ -724,7 +727,7 @@ def test_budget_agent():
         
         test_queries = [
             "Create a $800 budget for groceries",
-            "How am I doing against my budget this month?",
+            "How am I doing against my budget last month?",
             "Where am I overspending?",
             "Set up a $300 budget for restaurants"
         ]
