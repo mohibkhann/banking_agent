@@ -917,33 +917,67 @@ def generate_sql_for_client_analysis(
     schema_desc = "\n".join(schema_desc_lines)
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", f"""
-You are an expert SQL generator for banking transaction analysis.
-Generate efficient SQLite queries against client_transactions.
+                ("system", f"""
+            You are an expert SQL generator for banking transaction analysis.
+            Generate efficient SQLite queries against client_transactions. Try making a SQL query which can provide rich, comparative data without deciding the answer inside SQL.
 
-{date_context}
+            {date_context}
 
-{schema_desc}
+            {schema_desc}
 
-CRITICAL REQUIREMENTS:
-- ALWAYS include WHERE client_id = {client_id}
-- Use the CURRENT DATE CONTEXT above for date filtering
-- NEVER use hardcoded years like 2023 - always use the current dates provided
-- Use indexed columns: client_id, date, mcc_category, amount
-- Date format YYYY-MM-DD
-- Use Aliases in your query
-- Aggregates: SUM, AVG, COUNT
-- RETURN ONLY THE SQL QUERY - no explanations or markdown
+            CRITICAL REQUIREMENTS:
+            - ALWAYS include WHERE client_id = {client_id}
+            - Use the CURRENT DATE CONTEXT above for date filtering
+            - If the user explicitly mentions specific dates/years (e.g., "2021 or 2023"), you MAY use those exact periods with range filters (YYYY-01-01 to YYYY-12-31). Otherwise, NEVER hardcode years; derive from the provided date context
+            - Use indexed columns: client_id, date, mcc_category, amount
+            - Date format YYYY-MM-DD
+            - Use Aliases in your query
+            - Aggregates: SUM, AVG, COUNT
+            - NOT SELF-DECIDING: never pick a “winner” or collapse to a single answer in SQL.
+            - DO NOT use ORDER BY ... LIMIT 1 to select the max/min period
+            - DO NOT use CASE expressions that compare aggregates to choose a label (e.g., return '2021' vs '2023')
+            - DO NOT use subqueries that filter to only the max/min aggregate
+            - INSTEAD return one row per candidate period/category (e.g., year, month, mcc_category) with the relevant aggregates so the application can decide
+            - Prefer sargable range filters over strftime when possible to leverage indexes:
+            - e.g., date >= 'YYYY-01-01' AND date < 'YYYY+1-01-01'
+            - Try giving a query which provides all the needed comparative data and remains not self-deciding
+            - RETURN ONLY THE SQL QUERY - no explanations or markdown
 
-EXAMPLES:
-- "last month spending" → WHERE date >= 'YYYY-MM-DD' AND date <= 'YYYY-MM-DD' (use last month dates from context)
-- "this year" → WHERE date >= 'YYYY-01-01' AND date <= 'YYYY-MM-DD' (current year)
+            EXAMPLES:
+            - "last month spending" → WHERE date >= 'YYYY-MM-01' AND date <= 'YYYY-MM-DD' (use last-month dates from context); GROUP BY day or category as needed
+            - "this year" → WHERE date >= 'YYYY-01-01' AND date <= 'YYYY-MM-DD' (current year to date)
 
-Generate ONLY the SQL query for:
-"""),
-        ("human", "{user_query}")
-    ])
+            BAD (self-deciding):
+            SELECT CASE
+            WHEN SUM(CASE WHEN date >= '2021-01-01' AND date <= '2021-12-31' THEN amount ELSE 0 END) >
+                SUM(CASE WHEN date >= '2023-01-01' AND date <= '2023-12-31' THEN amount ELSE 0 END)
+            THEN '2021' ELSE '2023' END AS year_with_most_spending
+            FROM client_transactions
+            WHERE client_id = {client_id};
 
+            BAD (also self-deciding):
+            SELECT strftime('%Y',date) AS year,SUM(amount) AS total_spent
+            FROM client_transactions
+            WHERE client_id = {client_id} AND (date BETWEEN '2021-01-01' AND '2023-12-31')
+            GROUP BY year
+            ORDER BY total_spent DESC
+            LIMIT 1;
+
+            GOOD (comparative, not self-deciding; user named the years):
+            SELECT strftime('%Y',date) AS year,SUM(amount) AS total_spent
+            FROM client_transactions
+            WHERE client_id = {client_id}
+            AND (
+                (date >= '2021-01-01' AND date < '2022-01-01') OR
+                (date >= '2023-01-01' AND date < '2024-01-01')
+            )
+            GROUP BY year
+            ORDER BY year;
+
+            Generate ONLY the SQL query for:
+            """),
+                ("human", "{user_query}")
+            ])
     try:
         llm = ChatOpenAI(model="gpt-4o", temperature=0)
         resp = llm.invoke(prompt.format_messages(user_query=user_query))
