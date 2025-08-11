@@ -3,8 +3,6 @@ import operator
 from datetime import datetime
 from typing import Any, Dict, List, Optional, TypedDict, Annotated
 
-import numpy as np
-import pandas as pd
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser

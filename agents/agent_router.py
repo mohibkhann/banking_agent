@@ -32,29 +32,28 @@ from agents.budget_agent import BudgetAgent
 
 load_dotenv()
 
-
-# Pydantic models for routing
+# Pydantic models for routing with better domain detection
 class AgentRouting(BaseModel):
-    """Structured agent routing decision"""
+    """Structured agent routing decision with domain relevance"""
     
-    primary_agent: Literal["spending", "budget"] = Field(
-        description="Primary agent to handle the query: 'spending' for spending analysis, 'budget' for budget management"
+    is_relevant: bool = Field(
+        description="True if query is related to personal finance, spending, budgeting, or banking; False otherwise"
     )
-    secondary_agent: Optional[Literal["spending", "budget"]] = Field(
-        default=None,
-        description="Secondary agent if cross-agent context is needed"
+    primary_agent: Literal["spending", "budget", "irrelevant"] = Field(
+        description="Primary agent: 'spending' for transaction analysis, 'budget' for budget management, 'irrelevant' for off-topic"
     )
-    query_type: str = Field(
-        description="Type of query: spending_analysis, budget_management, comparative, or hybrid"
-    )
-    urgency: Literal["low", "medium", "high"] = Field(
-        description="Query urgency for prioritization"
+    query_category: str = Field(
+        description="Category: finance_spending, finance_budget, finance_general, greeting, off_topic, unclear"
     )
     confidence: float = Field(
         description="Routing confidence score between 0 and 1", ge=0.0, le=1.0
     )
     reasoning: str = Field(
         description="Brief explanation of routing decision"
+    )
+    suggested_response_tone: Optional[str] = Field(
+        default=None,
+        description="For irrelevant queries: friendly_redirect, polite_decline, or clarification_needed"
     )
 
 
@@ -85,12 +84,13 @@ class MultiAgentState(TypedDict):
     error: Optional[str]
     execution_path: List[str]
     session_id: str
+    enhanced_query: Optional[str]  # Add this field
 
 
 class PersonalFinanceRouter:
     """
     Intelligent router that manages multiple financial agents with memory and context.
-    Routes queries to appropriate agents and maintains conversation context.
+    Routes queries to appropriate agents and handles irrelevant queries gracefully.
     """
 
     def __init__(
@@ -131,7 +131,6 @@ class PersonalFinanceRouter:
         # Memory management
         self.enable_memory = enable_memory
         if enable_memory:
-            # Use in-memory checkpointer for latest LangGraph
             self.memory = MemorySaver()
             print(f"💾 Memory: In-memory checkpointer enabled")
         else:
@@ -155,11 +154,12 @@ class PersonalFinanceRouter:
         workflow.add_node("query_router", self._query_router_node)
         workflow.add_node("spending_agent_node", self._spending_agent_node)
         workflow.add_node("budget_agent_node", self._budget_agent_node)
+        workflow.add_node("irrelevant_handler", self._irrelevant_handler_node)
         workflow.add_node("response_synthesizer", self._response_synthesizer_node)
         workflow.add_node("memory_updater", self._memory_updater_node)
         workflow.add_node("error_handler", self._error_handler_node)
 
-        # Entry point - using string
+        # Entry point
         workflow.set_entry_point("context_manager")
 
         # Routing logic
@@ -170,17 +170,20 @@ class PersonalFinanceRouter:
             {
                 "spending": "spending_agent_node",
                 "budget": "budget_agent_node",
+                "irrelevant": "irrelevant_handler",
                 "error": "error_handler"
             }
         )
 
         workflow.add_edge("spending_agent_node", "response_synthesizer")
         workflow.add_edge("budget_agent_node", "response_synthesizer")
+        workflow.add_edge("irrelevant_handler", "response_synthesizer")
         workflow.add_edge("response_synthesizer", "memory_updater")
         workflow.add_edge("memory_updater", END)
         workflow.add_edge("error_handler", END)
 
         return workflow.compile(checkpointer=self.memory)
+
 
     def _context_manager_node(self, state: MultiAgentState) -> MultiAgentState:
         """Enhanced conversation context and memory management with better follow-up handling"""
@@ -229,6 +232,9 @@ class PersonalFinanceRouter:
             # Enhanced topic detection with context awareness
             query_lower = user_query.lower()
             
+            # Initialize enhanced_query as None
+            state["enhanced_query"] = None
+            
             # For follow-up queries, enhance with context
             is_followup = False
             followup_patterns = ["ok", "please show", "show me", "tell me", "yes", "continue", "more details"]
@@ -250,8 +256,12 @@ class PersonalFinanceRouter:
                     print(f"[DEBUG] 💡 Enhanced query with context: budget details requested")
             
             # Detect topics from current query (enhanced or original)
-            enhanced_query = state.get("enhanced_query", user_query)
-            enhanced_lower = enhanced_query.lower()
+            # Fix: Check if enhanced_query exists and is not None
+            enhanced_query = state.get("enhanced_query")
+            if enhanced_query:
+                enhanced_lower = enhanced_query.lower()
+            else:
+                enhanced_lower = query_lower  # Use original query if no enhancement
             
             detected_topics = []
             
@@ -289,144 +299,198 @@ class PersonalFinanceRouter:
         return state
 
     def _query_router_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Intelligent query routing with enhanced follow-up handling"""
+        """Intelligent query routing with improved domain detection"""
 
         try:
             print("🎯 [DEBUG] Routing query to appropriate agent...")
 
             context = state.get("conversation_context")
-            enhanced_query = state.get("enhanced_query")  # May have context-enhanced query
+            enhanced_query = state.get("enhanced_query")
             original_query = state["user_query"]
-            
-            # Use enhanced query for routing if available, original otherwise
             query_for_routing = enhanced_query if enhanced_query else original_query
             
             recent_context = ""
             if context:
                 recent_context = f"""
-CONVERSATION CONTEXT:
-- Message count: {context.message_count}
-- Recent topics: {', '.join(context.recent_topics)}
-- Last agent used: {context.last_agent_used or 'None'}
-- Key insights: {', '.join(context.key_insights[-3:]) if context.key_insights else 'None'}
-"""
+    CONVERSATION CONTEXT:
+    - Message count: {context.message_count}
+    - Recent topics: {', '.join(context.recent_topics)}
+    - Last agent used: {context.last_agent_used or 'None'}
+    - Key insights: {', '.join(context.key_insights[-3:]) if context.key_insights else 'None'}
+    """
 
-            routing_prompt = ChatPromptTemplate.from_messages([
-                (
-                    "system",
-                    f"""You are an intelligent query router for a personal finance system.
-
-You have access to two specialized agents:
-
-**SPENDING AGENT** - Best for:
-- Spending analysis and transaction queries
-- "How much did I spend on X?"
-- "Show me my spending by category"
-- "What's my average transaction?"
-- "Compare my spending to others"
-- Historical spending analysis
-- Follow-up questions about spending data
-
-**BUDGET AGENT** - Best for:
-- Budget management and planning
-- "Create a budget for X"
-- "How am I doing against my budget?"
-- "Where am I overspending?"
-- "Set up a budget"
-- Budget performance and optimization
-
-{recent_context}
-
-ROUTING RULES:
-1. If user asks about spending/transactions → SPENDING AGENT
-2. If user asks about budgets/budget creation → BUDGET AGENT  
-3. For follow-ups or vague queries → use CONTEXT (last agent or topic)
-4. When user asks something irrelevant to finance, budgeting or spendings reply with only irrelevant
-5. Simple responses like "ok please show", "yes", "tell me more" → use LAST AGENT + TOPIC CONTEXT
-
-Query to analyze: "{query_for_routing}"
-Original user input: "{original_query}"
-
-Respond with just the agent name: "spending" or "budget" or "irrelevant"
-"""
-                ),
-                (
-                    "human",
-                    "Route this query based on the context provided above."
-                )
-            ])
-
+            # First try structured parsing with Pydantic
             try:
-                # Try simple routing without structured parsing
-                chain = routing_prompt | self.llm
-                routing_response = chain.invoke({
-                    "query_for_routing": query_for_routing,
-                    "original_query": original_query
-                })
-                
-                # Extract agent from response
-                response_text = routing_response.content.lower().strip()
-                
-                if "spending" in response_text:
-                    primary_agent = "spending"
-                    reasoning = "Query contains spending-related content or context"
-                elif "budget" in response_text:
-                    primary_agent = "budget"
-                    reasoning = "Query contains budget-related content or context"
+                routing_prompt = ChatPromptTemplate.from_messages([
+                    (
+                        "system",
+                        f"""You are an intelligent query router for a personal finance assistant system.
 
-                elif "irrelevant" in response_text:
-                    primary_agent = "irrelevant"
-                    reasoning = "Query is irrelevant to my domain"
+                Your job is to determine if queries are relevant to personal finance/banking and route them appropriately.
 
-        
-                else:
-                    # Enhanced fallback logic
-                    primary_agent, reasoning = self._enhanced_fallback_routing(
-                        original_query, query_for_routing, context
+                DOMAIN SCOPE:
+                Our system handles:
+                - Personal spending analysis and transactions
+                - Budget creation, management, and tracking  
+                - Financial comparisons and benchmarks
+                - Banking transactions and account information
+                - Savings goals and financial planning
+                - Spending patterns and insights
+
+                ROUTING RULES:
+
+                1. **RELEVANT FINANCE QUERIES** (is_relevant: true):
+                - Spending/transactions → primary_agent: "spending"
+                - Budget management → primary_agent: "budget"
+                - General finance questions → choose most appropriate agent
+                - **Questions about capabilities in finance context** → primary_agent: "spending"
+
+                2. **EXAMPLES OF RELEVANT QUERIES:**
+                - "How much did I spend last month?" → spending
+                - "Create a budget for groceries" → budget
+                - "What can you help me with?" → spending (finance capabilities)
+                - "What else can you do?" → spending (finance capabilities)
+                - "How can you assist me?" → spending (finance capabilities)
+                - "What services do you provide?" → spending (finance capabilities)
+
+                3. **IRRELEVANT QUERIES** (is_relevant: false):
+                Examples of irrelevant:
+                - General knowledge ("What is the capital of France?")
+                - Weather, news, sports
+                - Programming/coding help (unless finance-related)
+                - Health, recipes, travel planning
+                - Entertainment recommendations
+                - Academic subjects unrelated to finance
+
+                For these → primary_agent: "irrelevant"
+
+                4. **AMBIGUOUS QUERIES**:
+                - If unclear but possibly finance-related → mark as relevant and route to spending agent
+                - If clearly off-topic → mark as irrelevant
+
+                {recent_context}
+
+                Provide a JSON response with these fields:
+                - is_relevant: boolean (true if finance-related, false otherwise)
+                - primary_agent: string ("spending", "budget", or "irrelevant")
+                - query_category: string (describe the type of query)
+                - confidence: number between 0 and 1
+                - reasoning: string (brief explanation)
+                - suggested_response_tone: string or null (for irrelevant queries: "friendly_redirect", "polite_decline", or null)
+
+                Analyze this query:
+                Query: "{query_for_routing}"
+                Original input: "{original_query}"
+                """
+                    ),
+                    (
+                        "human",
+                        "Route this query and respond with a JSON object containing the routing decision."
                     )
+                ])
 
-                state["routing_decision"] = {
-                    "primary_agent": primary_agent,
-                    "secondary_agent": None,
-                    "query_type": "analysis",
-                    "urgency": "medium",
-                    "confidence": 0.8,
-                    "reasoning": reasoning,
-                    "routing_method": "context_aware",
-                    "enhanced_query_used": enhanced_query is not None
-                }
+                response = self.llm.invoke(
+                    routing_prompt.format_messages(
+                        query_for_routing=query_for_routing,
+                        original_query=original_query,
+                        recent_context=recent_context
+                    )
+                )
                 
-                print(f"[DEBUG] ✅ Routed to: {primary_agent} ({reasoning})")
+                # Parse JSON response
+                import json
+                response_text = response.content.strip()
+                
+                # Try to extract JSON from the response
+                if "```json" in response_text:
+                    json_start = response_text.find("```json") + 7
+                    json_end = response_text.find("```", json_start)
+                    response_text = response_text[json_start:json_end].strip()
+                elif "{" in response_text and "}" in response_text:
+                    # Find the JSON object in the response
+                    json_start = response_text.find("{")
+                    json_end = response_text.rfind("}") + 1
+                    response_text = response_text[json_start:json_end]
+                
+                try:
+                    routing_dict = json.loads(response_text)
+                    
+                    # Validate required fields
+                    required_fields = ["is_relevant", "primary_agent", "confidence", "reasoning"]
+                    for field in required_fields:
+                        if field not in routing_dict:
+                            raise ValueError(f"Missing required field: {field}")
+                    
+                    # Set defaults for optional fields
+                    routing_dict.setdefault("query_category", "unknown")
+                    routing_dict.setdefault("suggested_response_tone", None)
+                    
+                    print(f"[DEBUG] ✅ Query relevance: {routing_dict['is_relevant']}")
+                    print(f"[DEBUG] ✅ Routed to: {routing_dict['primary_agent']} ({routing_dict['reasoning']})")
+                    print(f"[DEBUG] ✅ Confidence: {routing_dict['confidence']:.2f}")
+                    
+                except (json.JSONDecodeError, ValueError) as e:
+                    print(f"[DEBUG] JSON parsing failed: {e}, using keyword-based routing")
+                    raise e
+                
+                state["routing_decision"] = routing_dict
+                
                 if enhanced_query:
                     print(f"[DEBUG] 💡 Used enhanced query for routing")
 
             except Exception as parse_error:
-                print(f"[DEBUG] Context-aware routing failed, using enhanced fallback: {parse_error}")
+                print(f"[DEBUG] Structured routing failed ({parse_error}), using simplified fallback")
                 
-                primary_agent, reasoning = self._enhanced_fallback_routing(
-                    original_query, query_for_routing, context
-                )
+                # Simplified fallback without structured parsing
+                fallback_prompt = ChatPromptTemplate.from_messages([
+                    ("system", """You are a router for a personal finance assistant.
 
+    Determine if this query is about:
+    1. Personal spending/transactions → respond: "spending"
+    2. Budget management → respond: "budget"  
+    3. Neither (off-topic) → respond: "irrelevant"
+
+    Respond with ONLY ONE WORD: spending, budget, or irrelevant"""),
+                    ("human", "Query: {query}")
+                ])
+                
+                fallback_response = self.llm.invoke(
+                    fallback_prompt.format_messages(query=query_for_routing)
+                )
+                
+                response_text = fallback_response.content.lower().strip()
+                
+                # Determine agent from response
+                if "spending" in response_text:
+                    primary_agent = "spending"
+                    is_relevant = True
+                elif "budget" in response_text:
+                    primary_agent = "budget"
+                    is_relevant = True
+                else:
+                    primary_agent = "irrelevant"
+                    is_relevant = False
+                
                 state["routing_decision"] = {
+                    "is_relevant": is_relevant,
                     "primary_agent": primary_agent,
-                    "secondary_agent": None,
-                    "query_type": "analysis", 
-                    "urgency": "medium",
+                    "query_category": "unknown",
                     "confidence": 0.7,
-                    "reasoning": reasoning,
-                    "routing_method": "enhanced_fallback"
+                    "reasoning": "Fallback routing based on keyword detection",
+                    "suggested_response_tone": "friendly_redirect" if not is_relevant else None
                 }
                 
-                print(f"[DEBUG] ✅ Enhanced fallback routed to: {primary_agent} ({reasoning})")
+                print(f"[DEBUG] ✅ Fallback routed to: {primary_agent}")
 
             state["execution_path"].append("query_router")
 
         except Exception as e:
             print(f"❌ Query routing error: {e}")
             state["error"] = f"Query routing failed: {e}"
+            state["routing_decision"] = None  # Ensure it's set even on error
 
         return state
-    
+            
     def _enhanced_fallback_routing(self, original_query: str, enhanced_query: str, context) -> tuple:
         """Enhanced fallback routing with better context awareness"""
         
@@ -467,15 +531,28 @@ Respond with just the agent name: "spending" or "budget" or "irrelevant"
         try:
             print("📊 [DEBUG] Executing spending agent query...")
 
-            # Use enhanced query if available, otherwise use original
-            query_to_process = state.get("enhanced_query", state["user_query"])
+            # Ensure we have a valid query to process
+            original_query = state.get("user_query")
+            enhanced_query = state.get("enhanced_query")
             
-            if state.get("enhanced_query"):
+            # Use enhanced query if available AND not None, otherwise use original
+            query_to_process = enhanced_query if enhanced_query else original_query
+            
+            # Safety check - ensure query_to_process is not None
+            if not query_to_process:
+                print(f"[DEBUG] ❌ No valid query to process. Original: {original_query}, Enhanced: {enhanced_query}")
+                state["error"] = "No valid query provided to spending agent"
+                state["primary_response"] = "I couldn't process your query. Please try asking about your spending again."
+                return state
+            
+            if enhanced_query:
                 print(f"[DEBUG] 💡 Processing enhanced query: {query_to_process}")
+            else:
+                print(f"[DEBUG] 📝 Processing original query: {query_to_process}")
 
             result = self.spending_agent.process_query(
                 client_id=state["client_id"],
-                user_query=query_to_process  # Use context-enhanced query
+                user_query=query_to_process  # Now guaranteed to be non-None
             )
 
             state["primary_response"] = result.get("response")
@@ -490,8 +567,10 @@ Respond with just the agent name: "spending" or "budget" or "irrelevant"
         except Exception as e:
             print(f"❌ Spending agent error: {e}")
             state["error"] = f"Spending agent failed: {e}"
+            state["primary_response"] = None
 
         return state
+    
 
     def _budget_agent_node(self, state: MultiAgentState) -> MultiAgentState:
         """Execute budget agent query with context-aware processing"""
@@ -499,15 +578,28 @@ Respond with just the agent name: "spending" or "budget" or "irrelevant"
         try:
             print("💰 [DEBUG] Executing budget agent query...")
 
-            # Use enhanced query if available, otherwise use original
-            query_to_process = state.get("enhanced_query", state["user_query"])
+            # Ensure we have a valid query to process
+            original_query = state.get("user_query")
+            enhanced_query = state.get("enhanced_query")
             
-            if state.get("enhanced_query"):
+            # Use enhanced query if available AND not None, otherwise use original
+            query_to_process = enhanced_query if enhanced_query else original_query
+            
+            # Safety check - ensure query_to_process is not None
+            if not query_to_process:
+                print(f"[DEBUG] ❌ No valid query to process. Original: {original_query}, Enhanced: {enhanced_query}")
+                state["error"] = "No valid query provided to budget agent"
+                state["primary_response"] = "I couldn't process your query. Please try asking about your budget again."
+                return state
+            
+            if enhanced_query:
                 print(f"[DEBUG] 💡 Processing enhanced query: {query_to_process}")
+            else:
+                print(f"[DEBUG] 📝 Processing original query: {query_to_process}")
 
             result = self.budget_agent.process_query(
                 client_id=state["client_id"],
-                user_query=query_to_process  # Use context-enhanced query
+                user_query=query_to_process  # Now guaranteed to be non-None
             )
 
             state["primary_response"] = result.get("response")
@@ -522,11 +614,12 @@ Respond with just the agent name: "spending" or "budget" or "irrelevant"
         except Exception as e:
             print(f"❌ Budget agent error: {e}")
             state["error"] = f"Budget agent failed: {e}"
+            state["primary_response"] = None
 
         return state
 
     def _response_synthesizer_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Enhanced response synthesis with conversation continuity"""
+        """Enhanced response synthesis with better handling of irrelevant queries"""
 
         try:
             print("🔧 [DEBUG] Synthesizing final response...")
@@ -536,58 +629,53 @@ Respond with just the agent name: "spending" or "budget" or "irrelevant"
             routing = state.get("routing_decision", {})
 
             if not primary_response:
-                state["final_response"] = "I apologize, but I couldn't generate a response to your query."
+                # Check if we have an error that needs to be communicated
+                if state.get("error"):
+                    state["final_response"] = f"I encountered an issue: {state['error']}\n\nPlease try rephrasing your question about spending or budgeting."
+                else:
+                    state["final_response"] = "I apologize, but I couldn't generate a response to your query. Please try asking about your spending patterns or budget management."
                 return state
 
-            # Enhanced conversational continuity
-            prefix = ""
-            if context and context.message_count > 1:
-                # Different prefixes based on conversation state
-                if context.message_count == 2:
-                    if routing.get("routing_method") == "fallback" and context.last_agent_used:
-                        prefix = ""  # No prefix for natural follow-up
-                elif context.message_count > 2:
-                    # Check if this is a follow-up that should be connected
-                    query_lower = state["user_query"].lower()
-                    if any(word in query_lower for word in ["please provide", "show me", "tell me more", "continue", "yes"]):
-                        prefix = ""  # Natural continuation
-                    elif context.last_agent_used == routing.get("primary_agent"):
-                        prefix = ""  # Same agent, natural flow
-                    else:
+            # Handle case when routing_decision is None or empty
+            if not routing:
+                state["final_response"] = primary_response
+                state["execution_path"].append("response_synthesizer")
+                return state
+
+            # Different handling for irrelevant queries
+            if routing.get("primary_agent") == "irrelevant":
+                # For irrelevant queries, use the response as-is without adding finance suggestions
+                state["final_response"] = primary_response
+            else:
+                # For relevant queries, add contextual suggestions
+                prefix = ""
+                if context and context.message_count > 1:
+                    # Add context-aware prefixes for conversation continuity
+                    if context.last_agent_used and context.last_agent_used != routing.get("primary_agent"):
                         prefix = f"Switching to {routing.get('primary_agent')} analysis... "
-            
-            # Combine response
-            state["final_response"] = prefix + primary_response
-
-            # Enhanced cross-agent suggestions based on conversation flow
-            agent_used = routing.get("primary_agent")
-            recent_topics = context.recent_topics if context else []
-            
-            suggestion = ""
-            if agent_used == "spending":
-                if "budget" not in recent_topics and context and context.message_count >= 2:
+                
+                state["final_response"] = prefix + primary_response
+                
+                # Add cross-agent suggestions for relevant queries
+                agent_used = routing.get("primary_agent")
+                recent_topics = context.recent_topics if context else []
+                
+                suggestion = ""
+                if agent_used == "spending" and "budget" not in recent_topics:
                     suggestion = "\n\n💡 *Based on this spending analysis, would you like help creating or reviewing a budget?*"
-                elif "comparison" not in recent_topics:
-                    suggestion = "\n\n📊 *I can also show you how your spending compares to similar customers if you're interested.*"
-            elif agent_used == "budget":
-                if "spending" in recent_topics:
-                    suggestion = "\n\n📈 *I can provide more detailed spending breakdowns to help fine-tune your budget.*"
-                elif context and context.message_count <= 2:
+                elif agent_used == "budget" and context and context.message_count <= 2:
                     suggestion = "\n\n🎯 *I can also analyze your historical spending patterns to suggest better budget allocations.*"
-            elif agent_used == "irrelevant":
-                suggestion = "\n\n📈 *I can not provide an answer to that, please ask me about your spendings or if you need any help with budgeting*"
-
-            state["final_response"] += suggestion
+                
+                state["final_response"] += suggestion
 
             state["execution_path"].append("response_synthesizer")
-            print("✅ Response synthesis complete with conversation continuity")
+            print("✅ Response synthesis complete")
 
         except Exception as e:
             print(f"❌ Response synthesis error: {e}")
-            state["final_response"] = state.get("primary_response", "I apologize, but I encountered an issue processing your request.")
+            state["final_response"] = state.get("primary_response", "I apologize, but I encountered an issue processing your request. Please try asking about your spending or budget.")
 
         return state
-
     def _memory_updater_node(self, state: MultiAgentState) -> MultiAgentState:
         """Update conversation memory and context"""
 
@@ -624,27 +712,100 @@ Respond with just the agent name: "spending" or "budget" or "irrelevant"
 
         return state
 
+    def _irrelevant_handler_node(self, state: MultiAgentState) -> MultiAgentState:
+        """Handle irrelevant queries with natural, helpful responses"""
+        
+        try:
+            print("🚫 [DEBUG] Handling irrelevant query...")
+            
+            user_query = state["user_query"]
+            context = state.get("conversation_context")
+            
+            # Generate natural, helpful response
+            response_prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are a friendly personal banking assistant. The user has asked a question that's outside your expertise area of personal finance, spending, and budgeting.
+
+    Your response should be:
+    1. Warm and understanding
+    2. Briefly acknowledge their question
+    3. Naturally redirect to what you can help with
+    4. Offer specific examples relevant to banking/finance
+
+    Keep it conversational - like a bank employee politely redirecting the conversation.
+
+    AVOID:
+    - Technical explanations about your limitations
+    - Formal language like "I'm designed to" or "My domain is"
+    - Long lists of capabilities
+    - Apologetic tone
+
+    BE NATURAL AND HELPFUL:
+    - "That's outside my area, but I'm here to help with your finances!"
+    - "I focus on helping with your money matters"
+    - Give 2-3 specific examples of what you can do
+    """),
+                ("human", """The user asked: "{query}"
+
+    Provide a brief, natural response that redirects them to finance topics.""")
+            ])
+            
+            response = self.llm.invoke(
+                response_prompt.format_messages(query=user_query)
+            )
+            
+            base_response = response.content
+            
+            suggestions = ""
+            if context and context.recent_topics:
+                if "spending" in context.recent_topics:
+                    suggestions = "\n\nSince we were talking about your spending, would you like to dive deeper into any particular category or time period?"
+                elif "budget" in context.recent_topics:
+                    suggestions = "\n\nWe were discussing budgets - would you like help setting up budgets for specific categories?"
+                elif "comparison" in context.recent_topics:
+                    suggestions = "\n\nI can show you how your spending compares to similar customers in different areas like dining, shopping, or entertainment."
+            else:
+                # Default suggestions for new conversations
+                suggestions = "\n\nI can help you understand where your money goes each month, set up budgets, or see how your spending compares to others. What interests you most?"
+            
+            state["primary_response"] = base_response + suggestions
+            state["execution_path"].append("irrelevant_handler")
+            
+            print(f"✅ Handled irrelevant query naturally")
+            
+        except Exception as e:
+            print(f"❌ Irrelevant handler error: {e}")
+            # Simple fallback response
+            state["primary_response"] = f"That's outside my area of expertise, but I'm here to help you with your finances! I can analyze your spending patterns, help you create budgets, or show you how you compare to similar customers. What would you like to explore?"
+            
+        return state
+
     def _error_handler_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Handle routing and execution errors"""
+        """Handle routing and execution errors with natural responses"""
 
         error_message = state.get("error", "Unknown routing error")
         print(f"🔧 [DEBUG] Handling router error: {error_message}")
+        
+        user_query = state["user_query"]
 
-        state["final_response"] = f"""I encountered an issue processing your request: {error_message}
-
-**I can help you with:**
-- 📊 **Spending Analysis**: "How much did I spend last month?"
-- 💰 **Budget Management**: "Create a $500 budget for groceries"
-- 📈 **Comparisons**: "How do I compare to others?"
-- 🎯 **Budget Tracking**: "Am I over budget this month?"
-
-Please try rephrasing your question, and I'll route it to the right specialist!"""
+        # Provide natural error responses without technical details
+        if "Invalid query" in error_message:
+            state["final_response"] = "I'd be happy to help! Could you tell me a bit more about what you'd like to know about your finances? I can help with spending analysis, budgeting, or comparing your habits to others."
+        
+        elif "Intent classification" in error_message or "routing" in error_message.lower():
+            state["final_response"] = "I want to make sure I understand what you're looking for. Are you interested in seeing your spending patterns, setting up a budget, or something else financial? Just let me know!"
+            
+        elif "No valid query" in error_message:
+            state["final_response"] = "I'm here to help with your financial questions! You can ask me about your spending, budgets, or how you compare to other customers. What would you like to know?"
+            
+        else:
+            # Generic friendly error
+            state["final_response"] = f"I ran into a small hiccup while processing your request. No worries though! Try asking me about your spending patterns, budget management, or financial comparisons. I'm here to help!"
 
         state["execution_path"].append("error_handler")
         return state
 
     def _route_to_agents(self, state: MultiAgentState) -> str:
-        """Determine which agent to route to"""
+        """Determine which agent/handler to route to"""
 
         if state.get("error"):
             return "error"
@@ -655,11 +816,14 @@ Please try rephrasing your question, and I'll route it to the right specialist!"
             return "error"
 
         primary_agent = routing_decision.get("primary_agent")
+        
+        # Route based on agent decision
         if primary_agent == "spending":
             return "spending"
         elif primary_agent == "budget":
             return "budget"
-        
+        elif primary_agent == "irrelevant":
+            return "irrelevant"
         else:
             state["error"] = f"Unknown agent: {primary_agent}"
             return "error"
@@ -686,21 +850,45 @@ Please try rephrasing your question, and I'll route it to the right specialist!"
             messages=[HumanMessage(content=user_query)],
             error=None,
             execution_path=[],
-            session_id=session_id
+            session_id=session_id,
+            enhanced_query=None  # Initialize this field
         )
 
         try:
             config = {"configurable": {"thread_id": session_id}} if self.memory else {}
             final_state = self.graph.invoke(initial_state, config=config)
 
+            # Handle case where routing_decision might be None
+            agent_used = "unknown"
+            if final_state.get("routing_decision"):
+                agent_used = final_state["routing_decision"].get("primary_agent", "unknown")
+
+            # Handle case where conversation_context might be None
+            message_count = 0
+            if final_state.get("conversation_context"):
+                message_count = final_state["conversation_context"].message_count
+            else:
+                # Create a default context if it doesn't exist
+                default_context = ConversationContext(
+                    client_id=client_id,
+                    session_start=datetime.now(),
+                    last_interaction=datetime.now(),
+                    message_count=1,
+                    recent_topics=[],
+                    last_agent_used=None,
+                    conversation_summary="",
+                    key_insights=[]
+                )
+                message_count = default_context.message_count
+
             return {
                 "client_id": client_id,
                 "session_id": session_id,
                 "query": user_query,
                 "response": final_state.get("final_response", "No response generated"),
-                "agent_used": final_state.get("routing_decision", {}).get("primary_agent", "unknown"),
+                "agent_used": agent_used,
                 "execution_path": final_state.get("execution_path", []),
-                "message_count": final_state.get("conversation_context", ConversationContext(0, datetime.now(), datetime.now(), 0, [], None, "", [])).message_count,
+                "message_count": message_count,
                 "error": final_state.get("error"),
                 "timestamp": datetime.now().isoformat(),
                 "success": final_state.get("error") is None,
@@ -708,11 +896,14 @@ Please try rephrasing your question, and I'll route it to the right specialist!"
 
         except Exception as e:
             print(f"❌ Router execution error: {e}")
+            import traceback
+            traceback.print_exc()  # This will help debug the exact line causing issues
+            
             return {
                 "client_id": client_id,
                 "session_id": session_id,
                 "query": user_query,
-                "response": "I encountered a system error. Please try again with a simpler question.",
+                "response": "I encountered a system error. Please try again with a simpler question about your spending or budget.",
                 "agent_used": "error",
                 "error": str(e),
                 "timestamp": datetime.now().isoformat(),

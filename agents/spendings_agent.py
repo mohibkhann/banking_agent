@@ -27,19 +27,19 @@ sys.path.insert(
     )
 )
 
-# Import the updated DataStore and SQL tools
-from banking_agent.data_store.data_store import (
-DataStore,
-generate_sql_for_client_analysis,
-generate_sql_for_benchmark_analysis,
-execute_generated_sql
-)
-# from data_store.data_store import (
-#     DataStore,
-#     execute_generated_sql,
-#     generate_sql_for_benchmark_analysis,
-#     generate_sql_for_client_analysis,
+# # Import the updated DataStore and SQL tools
+# from banking_agent.data_store.data_store import (
+# DataStore,
+# generate_sql_for_client_analysis,
+# generate_sql_for_benchmark_analysis,
+# execute_generated_sql
 # )
+from data_store.data_store import (
+    DataStore,
+    execute_generated_sql,
+    generate_sql_for_benchmark_analysis,
+    generate_sql_for_client_analysis,
+)
 
 load_dotenv()
 
@@ -530,9 +530,7 @@ Analyze this query and provide structured classification:""",
 
         return state
 
-    def _analyze_personal_spending(
-        self, df: pd.DataFrame, state: SpendingAgentState
-    ) -> Dict[str, Any]:
+    def _analyze_personal_spending(self, df: pd.DataFrame, state: SpendingAgentState) -> Dict[str, Any]:
         """Analyze personal spending data with safe calculations and rich insights"""
 
         if df.empty:
@@ -543,88 +541,121 @@ Analyze this query and provide structured classification:""",
         try:
             print(f" [DEBUG] Analyzing {len(df)} rows of client data")
             print(f" [DEBUG] Columns available: {list(df.columns)}")
-            print(
-                f" [DEBUG] Sample data: {df.head(1).to_dict('records') if not df.empty else 'None'}"
-            )
+            print(f" [DEBUG] Sample data: {df.head(1).to_dict('records') if not df.empty else 'None'}")
 
-            # Basic spending metrics
-            if "amount" in df.columns:
-                amounts = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
-
-                analysis["spending_summary"] = {
-                    "total_amount": float(amounts.sum()),
-                    "transaction_count": len(df),
-                    "average_transaction": float(amounts.mean())
-                    if len(amounts) > 0
-                    else 0,
-                    "median_transaction": float(amounts.median())
-                    if len(amounts) > 0
-                    else 0,
-                    "max_transaction": float(amounts.max()) if len(amounts) > 0 else 0,
-                    "min_transaction": float(amounts.min()) if len(amounts) > 0 else 0,
-                }
-
-                print(
-                    f" [DEBUG] Spending summary: ${amounts.sum():.2f} total, {len(df)} transactions"
-                )
-
-            # Category breakdown if available
-            if "mcc_category" in df.columns and "amount" in df.columns:
-                try:
+            # Check if this is an aggregated result (like SUM, AVG queries)
+            # These typically have custom column names from the SQL query
+            is_aggregated = False
+            aggregated_columns = []
+            
+            for col in df.columns:
+                col_lower = col.lower()
+                if any(agg in col_lower for agg in ['sum', 'total', 'avg', 'average', 'count', 'max', 'min']):
+                    is_aggregated = True
+                    aggregated_columns.append(col)
+            
+            if is_aggregated:
+                print(f" [DEBUG] Detected aggregated query result with columns: {aggregated_columns}")
+                
+                # Handle aggregated results
+                analysis["aggregated_results"] = {}
+                for col in df.columns:
+                    value = df[col].iloc[0] if len(df) > 0 else None
+                    if value is not None:
+                        # Convert to appropriate type
+                        if pd.api.types.is_numeric_dtype(df[col]):
+                            analysis["aggregated_results"][col] = float(value)
+                        else:
+                            analysis["aggregated_results"][col] = str(value)
+                
+                # Add query type context
+                analysis["query_type"] = "aggregated"
+                
+                # Try to extract meaningful insights from column names
+                if any('total' in col.lower() or 'sum' in col.lower() for col in df.columns):
+                    for col in df.columns:
+                        if 'total' in col.lower() or 'sum' in col.lower():
+                            analysis["spending_summary"] = {
+                                "total_amount": float(df[col].iloc[0]) if pd.api.types.is_numeric_dtype(df[col]) else 0
+                            }
+                            break
+            
+            else:
+                # Handle detailed transaction results (original logic)
+                print(f" [DEBUG] Processing detailed transaction data")
+                
+                # Basic spending metrics
+                if "amount" in df.columns:
                     amounts = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
-                    df_with_amounts = df.copy()
-                    df_with_amounts["amount"] = amounts
 
-                    category_analysis = (
-                        df_with_amounts.groupby("mcc_category")["amount"]
-                        .agg(["sum", "count", "mean"])
-                        .round(2)
-                    )
-                    category_analysis = category_analysis.sort_values(
-                        "sum", ascending=False
-                    )
-
-                    # Convert to dict format that's easy for LLM to understand
-                    category_breakdown = {}
-                    for category in category_analysis.index:
-                        category_breakdown[category] = {
-                            "total_spent": float(category_analysis.loc[category, "sum"]),
-                            "transaction_count": int(
-                                category_analysis.loc[category, "count"]
-                            ),
-                            "average_per_transaction": float(
-                                category_analysis.loc[category, "mean"]
-                            ),
-                        }
-
-                    analysis["category_breakdown"] = {
-                        "categories": category_breakdown,
-                        "top_category": category_analysis.index[0]
-                        if len(category_analysis) > 0
-                        else "Unknown",
-                        "total_categories": len(category_analysis),
+                    analysis["spending_summary"] = {
+                        "total_amount": float(amounts.sum()),
+                        "transaction_count": len(df),
+                        "average_transaction": float(amounts.mean()) if len(amounts) > 0 else 0,
+                        "median_transaction": float(amounts.median()) if len(amounts) > 0 else 0,
+                        "max_transaction": float(amounts.max()) if len(amounts) > 0 else 0,
+                        "min_transaction": float(amounts.min()) if len(amounts) > 0 else 0,
                     }
 
-                    print(
-                        f" [DEBUG] Found {len(category_analysis)} categories, top: {category_analysis.index[0] if len(category_analysis) > 0 else 'None'}"
-                    )
+                    print(f" [DEBUG] Spending summary: ${amounts.sum():.2f} total, {len(df)} transactions")
 
-                except Exception as cat_error:
-                    print(f" ⚠️ Category analysis error: {cat_error}")
+                # Category breakdown if available
+                if "mcc_category" in df.columns and "amount" in df.columns:
+                    try:
+                        amounts = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
+                        df_with_amounts = df.copy()
+                        df_with_amounts["amount"] = amounts
 
-            # Add raw data sample for LLM context
+                        category_analysis = (
+                            df_with_amounts.groupby("mcc_category")["amount"]
+                            .agg(["sum", "count", "mean"])
+                            .round(2)
+                        )
+                        category_analysis = category_analysis.sort_values("sum", ascending=False)
+
+                        # Convert to dict format that's easy for LLM to understand
+                        category_breakdown = {}
+                        for category in category_analysis.index:
+                            category_breakdown[category] = {
+                                "total_spent": float(category_analysis.loc[category, "sum"]),
+                                "transaction_count": int(category_analysis.loc[category, "count"]),
+                                "average_per_transaction": float(category_analysis.loc[category, "mean"]),
+                            }
+
+                        analysis["category_breakdown"] = {
+                            "categories": category_breakdown,
+                            "top_category": category_analysis.index[0] if len(category_analysis) > 0 else "Unknown",
+                            "total_categories": len(category_analysis),
+                        }
+
+                        print(f" [DEBUG] Found {len(category_analysis)} categories, top: {category_analysis.index[0] if len(category_analysis) > 0 else 'None'}")
+
+                    except Exception as cat_error:
+                        print(f" ⚠️ Category analysis error: {cat_error}")
+
+                # Add query type for context
+                analysis["query_type"] = "detailed"
+
+            # Add raw data sample for LLM context (works for both types)
             if not df.empty:
-                # Get a sample of actual transactions for context
+                # Get a sample of actual data for context
                 sample_size = min(5, len(df))
                 sample_data = df.head(sample_size)
 
                 analysis["sample_transactions"] = []
                 for _, row in sample_data.iterrows():
                     transaction = {}
-                    for col in ["date", "amount", "mcc_category", "merchant_city"]:
+                    for col in df.columns:
                         if col in row:
-                            transaction[col] = row[col]
+                            value = row[col]
+                            # Convert to JSON-serializable format
+                            if pd.api.types.is_numeric_dtype(type(value)):
+                                transaction[col] = float(value) if pd.notna(value) else None
+                            else:
+                                transaction[col] = str(value) if pd.notna(value) else None
                     analysis["sample_transactions"].append(transaction)
+
+            print(f" [DEBUG] Analysis complete with type: {analysis.get('query_type', 'unknown')}")
 
         except Exception as e:
             analysis["error"] = f"Personal analysis error: {e}"
@@ -675,6 +706,7 @@ Analyze this query and provide structured classification:""",
 
         return analysis
 
+
     def _response_generator_node(self, state: SpendingAgentState) -> SpendingAgentState:
         """Generate comprehensive response with actual data insights"""
 
@@ -682,31 +714,41 @@ Analyze this query and provide structured classification:""",
             [
                 (
                     "system",
-                    """You are an expert financial advisor analyzing real banking transaction data.
+                    """You are a friendly, knowledgeable personal banking advisor. You work for the bank and help customers understand their spending.
 
-The user asked: "{user_query}"
+    The user asked: "{user_query}"
 
-You have successfully retrieved and analyzed their actual spending data. The analysis results contain REAL numbers and transactions from their account.
+    You have access to their real banking data. Your job is to:
 
-Your job is to:
-1. **Use the specific numbers** from the analysis results
-2. **Answer their exact question** with real data
-3. **Provide actionable insights** based on the actual spending patterns
-4. **Be specific and helpful** - use actual amounts, categories, and transaction counts
+    1. **Answer naturally and conversationally** - Like talking to a helpful bank employee
+    2. **Use actual numbers when available** - Give specific amounts from their data
+    3. **Handle missing data gracefully** - If no data is found, explain why and offer alternatives
+    4. **Never mention technical details** - No SQL, databases, null values, or system errors
+    5. **Be encouraging and helpful** - Focus on actionable insights
 
-NEVER say "the data provided doesn't include" or give generic advice. The analysis contains REAL transaction data that you should analyze and present clearly.
+    **CRITICAL RULES FOR MISSING DATA:**
+    - If you see null/empty results for clothing: "I don't see any clothing purchases in your recent transactions"
+    - If no comparison data: "Let me show you your spending in other categories first, then we can compare"
+    - If no data for a category: "You haven't made purchases in that category recently"
+    - NEVER say: "analysis provided", "dataset", "not available in current data", "null values"
 
-Analysis Type: {analysis_type}""",
+    **RESPONSE STYLE:**
+    - Start with a direct, natural answer
+    - Be warm and professional like a bank advisor
+    - Offer helpful next steps
+    - Sound human, not like a computer system
+
+    Analysis Type: {analysis_type}""",
                 ),
                 (
                     "human",
-                    """Based on this REAL analysis of the user's actual spending data:
+                    """Here is the analysis of the user's actual spending data:
 
-{results}
+    {results}
 
-Please provide a specific, data-driven response to their question: "{user_query}"
+    Please provide a natural, helpful response to their question: "{user_query}"
 
-Focus on the actual numbers and patterns in their spending data.""",
+    Remember: Be conversational, never mention technical details, and handle missing data gracefully.""",
                 ),
             ]
         )
@@ -714,29 +756,16 @@ Focus on the actual numbers and patterns in their spending data.""",
         try:
             results = state.get("analysis_result", [])
 
-            # Ensure we have something to work with
             if not results:
-                results = [
-                    {
-                        "type": "basic",
-                        "data": {
-                            "message": "Analysis completed but limited data available"
-                        },
-                    }
-                ]
+                state["response"] = "I wasn't able to find any spending data for your query. Let me help you look at your overall spending patterns instead, or you can ask about a specific time period."
+                state["execution_path"].append("response_generator")
+                return state
 
-            # Convert to JSON string safely
-            try:
-                results_json = json.dumps(results, indent=2, default=str)
-            except Exception as json_error:
-                results_json = str(results)
+            # Pre-process results to remove technical details and null values
+            cleaned_results = self._clean_results_for_user_response(results)
+            results_json = json.dumps(cleaned_results, indent=2, default=str)
 
-            print(f" [DEBUG] Sending to LLM: {len(results)} analysis results")
-            print(
-                f" [DEBUG] Sample result: {str(results[0])[:200]}..."
-                if results
-                else "No results"
-            )
+            print(f" [DEBUG] Sending cleaned data to LLM for natural response")
 
             response = self.llm.invoke(
                 response_prompt.format_messages(
@@ -749,62 +778,263 @@ Focus on the actual numbers and patterns in their spending data.""",
             state["response"] = response.content
             state["execution_path"].append("response_generator")
 
-            print(
-                f" [DEBUG] Generated response length: {len(response.content)} characters"
-            )
+            print(f" [DEBUG] Generated natural response length: {len(response.content)} characters")
 
         except Exception as e:
             print(f"❌ Response generation error: {e}")
-            # Provide a basic response based on available data
-            state["response"] = self._generate_fallback_response(state)
+            state["response"] = self._generate_natural_fallback_response(state)
             state["execution_path"].append("response_generator")
 
         return state
 
-    def _generate_fallback_response(self, state: SpendingAgentState) -> str:
-        """Generate a fallback response when main response generation fails"""
+    # ADD these helper methods to the SpendingAgent class:
+
+    def _clean_results_for_user_response(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Clean analysis results to remove technical details and handle null/missing data naturally"""
+        
+        cleaned_results = []
+        
+        for result in results:
+            cleaned_result = {"type": result.get("type")}
+            data = result.get("data", {})
+            
+            # Handle personal analysis data
+            if result.get("type") == "personal_analysis":
+                cleaned_data = {}
+                
+                # Handle aggregated results (like totals, sums)
+                if "aggregated_results" in data:
+                    aggregated = data["aggregated_results"]
+                    # Filter out null values and present meaningful data
+                    meaningful_data = {}
+                    for key, value in aggregated.items():
+                        if value is not None and value != 0:
+                            meaningful_data[key] = value
+                        elif value == 0:
+                            # Zero is meaningful, null is not
+                            meaningful_data[key] = value
+                    
+                    if meaningful_data:
+                        cleaned_data["spending_data"] = meaningful_data
+                    else:
+                        cleaned_data["data_status"] = "no_recent_activity"
+                
+                # Handle spending summary
+                if "spending_summary" in data:
+                    summary = data["spending_summary"]
+                    if summary.get("total_amount", 0) > 0:
+                        cleaned_data["spending_summary"] = summary
+                
+                # Handle category breakdown
+                if "category_breakdown" in data:
+                    categories = data["category_breakdown"]
+                    if categories.get("categories"):
+                        # Only include categories with actual spending
+                        active_categories = {k: v for k, v in categories["categories"].items() 
+                                        if v.get("total_spent", 0) > 0}
+                        if active_categories:
+                            cleaned_data["category_breakdown"] = {
+                                "categories": active_categories,
+                                "top_category": categories.get("top_category"),
+                                "total_categories": len(active_categories)
+                            }
+                
+                # Handle sample transactions (remove null/empty ones)
+                if "sample_transactions" in data:
+                    transactions = data["sample_transactions"]
+                    meaningful_transactions = []
+                    for txn in transactions:
+                        # Only include transactions with meaningful data (skip null values)
+                        clean_txn = {k: v for k, v in txn.items() if v is not None}
+                        if clean_txn and any(isinstance(v, (int, float)) and v != 0 for v in clean_txn.values()):
+                            meaningful_transactions.append(clean_txn)
+                    
+                    if meaningful_transactions:
+                        cleaned_data["sample_transactions"] = meaningful_transactions[:3]
+                
+                # If no meaningful data found, indicate this clearly
+                if not cleaned_data:
+                    cleaned_data = {"data_status": "no_matching_data"}
+                
+                cleaned_result["data"] = cleaned_data
+            
+            cleaned_results.append(cleaned_result)
+        
+        return cleaned_results
+
+    def _generate_natural_fallback_response(self, state: SpendingAgentState) -> str:
+        """Generate a natural, user-friendly fallback response"""
+        
+        user_query = state["user_query"].lower()
+        
+        # Detect what they were asking about
+        if "clothing" in user_query or "clothes" in user_query:
+            return "I don't see any clothing purchases in your recent transactions. This could mean you haven't made clothing purchases recently, or they might be categorized differently (like department stores). Would you like me to show you your spending by all categories instead?"
+        
+        elif "compare" in user_query or "average" in user_query:
+            return "I'd be happy to help you compare your spending! Let me look at your spending in different categories first. You can then ask me how you compare to similar customers in specific areas like dining, shopping, or transportation."
+        
+        elif "category" in user_query or "categories" in user_query:
+            return "Let me help you understand your spending by category. I can show you where your money goes each month and identify your top spending areas. What time period would you like me to analyze?"
+        
+        elif any(word in user_query for word in ["spend", "spent", "spending"]):
+            return "I can help you analyze your spending patterns. You can ask me about your total spending for specific time periods, spending by category, or how your spending compares to similar customers. What would you like to know?"
+        
+        else:
+            return f"I can help you with that! Let me know what specific aspect of your spending you'd like to explore. I can show you totals, breakdowns by category, or comparisons to other customers."
+
+    # ALSO UPDATE the _analyze_personal_spending method to better handle null data:
+
+    def _analyze_personal_spending(self, df: pd.DataFrame, state: SpendingAgentState) -> Dict[str, Any]:
+        """Analyze personal spending data with safe calculations and rich insights"""
+
+        if df.empty:
+            return {"error": "No personal spending data available"}
+
+        analysis = {}
 
         try:
-            analysis_results = state.get("analysis_result", [])
+            print(f" [DEBUG] Analyzing {len(df)} rows of client data")
+            print(f" [DEBUG] Columns available: {list(df.columns)}")
+            print(f" [DEBUG] Sample data: {df.head(1).to_dict('records') if not df.empty else 'None'}")
 
-            # Extract basic info from analysis results
-            response_parts = [f"I analyzed your query: '{state['user_query']}'"]
+            # Check if this is an aggregated result (like SUM, AVG queries)
+            is_aggregated = False
+            aggregated_columns = []
+            
+            for col in df.columns:
+                col_lower = col.lower()
+                if any(agg in col_lower for agg in ['sum', 'total', 'avg', 'average', 'count', 'max', 'min', 'difference']):
+                    is_aggregated = True
+                    aggregated_columns.append(col)
+            
+            if is_aggregated:
+                print(f" [DEBUG] Detected aggregated query result with columns: {aggregated_columns}")
+                
+                # Handle aggregated results
+                analysis["aggregated_results"] = {}
+                has_meaningful_data = False
+                
+                for col in df.columns:
+                    value = df[col].iloc[0] if len(df) > 0 else None
+                    if value is not None:
+                        # Convert to appropriate type
+                        if pd.api.types.is_numeric_dtype(df[col]):
+                            analysis["aggregated_results"][col] = float(value)
+                            if float(value) != 0:  # Check if we have non-zero data
+                                has_meaningful_data = True
+                        else:
+                            analysis["aggregated_results"][col] = str(value)
+                            has_meaningful_data = True
+                
+                # Add query type context
+                analysis["query_type"] = "aggregated"
+                
+                # If all values are null/zero, mark as no data
+                if not has_meaningful_data:
+                    analysis["data_status"] = "no_meaningful_data"
+                    # Add context about what might be missing
+                    user_query = state.get("user_query", "").lower()
+                    if "clothing" in user_query:
+                        analysis["context"] = "no_clothing_purchases"
+                    elif "compare" in user_query:
+                        analysis["context"] = "comparison_data_unavailable"
+                
+                # Try to extract meaningful insights from column names
+                if has_meaningful_data and any('total' in col.lower() or 'sum' in col.lower() for col in df.columns):
+                    for col in df.columns:
+                        if 'total' in col.lower() or 'sum' in col.lower():
+                            analysis["spending_summary"] = {
+                                "total_amount": float(df[col].iloc[0]) if pd.api.types.is_numeric_dtype(df[col]) else 0
+                            }
+                            break
+            
+            else:
+                # Handle detailed transaction results (original logic)
+                print(f" [DEBUG] Processing detailed transaction data")
+                
+                # Basic spending metrics
+                if "amount" in df.columns:
+                    amounts = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
 
-            for result in analysis_results:
-                if result.get("type") == "personal_analysis":
-                    data = result.get("data", {})
-                    if "spending_summary" in data:
-                        summary = data["spending_summary"]
-                        total = summary.get("total_amount", 0)
-                        count = summary.get("transaction_count", 0)
-                        avg = summary.get("average_transaction", 0)
+                    analysis["spending_summary"] = {
+                        "total_amount": float(amounts.sum()),
+                        "transaction_count": len(df),
+                        "average_transaction": float(amounts.mean()) if len(amounts) > 0 else 0,
+                        "median_transaction": float(amounts.median()) if len(amounts) > 0 else 0,
+                        "max_transaction": float(amounts.max()) if len(amounts) > 0 else 0,
+                        "min_transaction": float(amounts.min()) if len(amounts) > 0 else 0,
+                    }
 
-                        response_parts.append(
-                            f"Found {count} transactions totaling ${total:,.2f}"
+                    print(f" [DEBUG] Spending summary: ${amounts.sum():.2f} total, {len(df)} transactions")
+
+                # Category breakdown if available
+                if "mcc_category" in df.columns and "amount" in df.columns:
+                    try:
+                        amounts = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
+                        df_with_amounts = df.copy()
+                        df_with_amounts["amount"] = amounts
+
+                        category_analysis = (
+                            df_with_amounts.groupby("mcc_category")["amount"]
+                            .agg(["sum", "count", "mean"])
+                            .round(2)
                         )
-                        if avg > 0:
-                            response_parts.append(f"Average transaction: ${avg:.2f}")
+                        category_analysis = category_analysis.sort_values("sum", ascending=False)
 
-                    if "category_breakdown" in data:
-                        categories = data["category_breakdown"].get("categories", {})
-                        if categories:
-                            top_category = max(
-                                categories.items(), key=lambda x: x[1]["total_spent"]
-                            )
-                            response_parts.append(
-                                f"Top spending category: {top_category[0]} (${top_category[1]['total_spent']:,.2f})"
-                            )
+                        # Convert to dict format that's easy for LLM to understand
+                        category_breakdown = {}
+                        for category in category_analysis.index:
+                            category_breakdown[category] = {
+                                "total_spent": float(category_analysis.loc[category, "sum"]),
+                                "transaction_count": int(category_analysis.loc[category, "count"]),
+                                "average_per_transaction": float(category_analysis.loc[category, "mean"]),
+                            }
 
-            if len(response_parts) == 1:
-                response_parts.append(
-                    "The analysis completed successfully. You can try asking more specific questions about your spending patterns."
-                )
+                        analysis["category_breakdown"] = {
+                            "categories": category_breakdown,
+                            "top_category": category_analysis.index[0] if len(category_analysis) > 0 else "Unknown",
+                            "total_categories": len(category_analysis),
+                        }
 
-            return "\n\n".join(response_parts)
+                        print(f" [DEBUG] Found {len(category_analysis)} categories, top: {category_analysis.index[0] if len(category_analysis) > 0 else 'None'}")
 
-        except Exception:
-            return f"I processed your query '{state['user_query']}' and found some spending data. Please try asking more specific questions about your spending patterns."
+                    except Exception as cat_error:
+                        print(f" ⚠️ Category analysis error: {cat_error}")
 
+                # Add query type for context
+                analysis["query_type"] = "detailed"
+
+            # Add raw data sample for LLM context (works for both types)
+            if not df.empty:
+                # Get a sample of actual data for context
+                sample_size = min(3, len(df))  # Reduced sample size
+                sample_data = df.head(sample_size)
+
+                analysis["sample_transactions"] = []
+                for _, row in sample_data.iterrows():
+                    transaction = {}
+                    for col in df.columns:
+                        if col in row:
+                            value = row[col]
+                            # Convert to JSON-serializable format, skip null values
+                            if pd.notna(value):
+                                if pd.api.types.is_numeric_dtype(type(value)):
+                                    transaction[col] = float(value)
+                                else:
+                                    transaction[col] = str(value)
+                    
+                    # Only add transaction if it has meaningful data
+                    if transaction:
+                        analysis["sample_transactions"].append(transaction)
+
+            print(f" [DEBUG] Analysis complete with type: {analysis.get('query_type', 'unknown')}")
+
+        except Exception as e:
+            analysis["error"] = f"Personal analysis error: {e}"
+            print(f" ❌ Analysis error: {e}")
+
+        return analysis
     def _error_handler_node(self, state: SpendingAgentState) -> SpendingAgentState:
         """Enhanced error handling with helpful suggestions"""
 

@@ -9,6 +9,10 @@ __pycache__/
 build/
 dist/
 
+*.db
+*.db-shm
+*.db-wal
+
 # Data dumps
 *.db
 *.sqlite
