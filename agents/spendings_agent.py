@@ -28,18 +28,18 @@ sys.path.insert(
 )
 
 # Import the updated DataStore and SQL tools
-from banking_agent.data_store.data_store import (
-DataStore,
-generate_sql_for_client_analysis,
-generate_sql_for_benchmark_analysis,
-execute_generated_sql
-)
-# from data_store.data_store import (
-#     DataStore,
-#     execute_generated_sql,
-#     generate_sql_for_benchmark_analysis,
-#     generate_sql_for_client_analysis,
+# from banking_agent.data_store.data_store import (
+# DataStore,
+# generate_sql_for_client_analysis,
+# generate_sql_for_benchmark_analysis,
+# execute_generated_sql
 # )
+from data_store.data_store import (
+    DataStore,
+    execute_generated_sql,
+    generate_sql_for_benchmark_analysis,
+    generate_sql_for_client_analysis,
+)
 
 load_dotenv()
 
@@ -72,7 +72,6 @@ class IntentClassification(BaseModel):
 
 
 class SpendingAgentState(TypedDict):
-    """Enhanced state for SQL-first Spending Agent workflow"""
 
     client_id: int
     user_query: str
@@ -85,6 +84,7 @@ class SpendingAgentState(TypedDict):
     error: Optional[str]
     execution_path: List[str]
     analysis_type: Optional[str]
+    conversation_context: Optional[Any] 
 
 
 class SpendingAgent:
@@ -675,91 +675,210 @@ Analyze this query and provide structured classification:""",
 
     #     return analysis
 
+# Replace the _response_generator_node method in spendings_agent.py
+
     def _response_generator_node(self, state: SpendingAgentState) -> SpendingAgentState:
-        """Generate comprehensive response with actual data insights"""
+        """Generate comprehensive response with conversation context using raw data"""
+
+        # Always build context string (empty if no context)
+        context_string = self._build_context_for_prompt(state.get("conversation_context"))
 
         response_prompt = ChatPromptTemplate.from_messages(
             [
                 (
                     "system",
-                    """You are an expert financial advisor analyzing real banking transaction data.
+                    """You are a friendly, knowledgeable personal banking advisor. You work for the bank and help customers understand their spending.
 
-The user asked: "{user_query}"
+    The user asked: "{user_query}"
 
-You have successfully retrieved and analyzed their actual spending data. The analysis results contain REAL numbers and transactions from their account.
+    CONVERSATION CONTEXT:
+    {context_section}
 
-Your job is to:
-1. **Use the specific results** from the analysis results
-2. **Answer their exact question** with real data
-3. **Provide actionable insights** based on the actual spending patterns
-4. **Be specific and helpful** - use actual amounts, categories, and transaction counts
+    You have access to their real banking data. Your job is to:
 
-NEVER say "the data provided doesn't include" or give generic advice. The analysis contains REAL transaction data that you should analyze and present clearly.
+    1. **Answer naturally and conversationally** - Like talking to a helpful bank employee
+    2. **Use actual numbers when available** - Give specific amounts from their data
+    3. **Build on previous conversations** - Reference earlier discussions when relevant
+    4. **Handle missing data gracefully** - If no data is found, explain why and offer alternatives
+    5. **Never mention technical details** - No SQL, databases, null values, or system errors
+    6. **Be encouraging and helpful** - Focus on actionable insights
 
-Analysis Type: {analysis_type}""",
+    **CONVERSATION CONTINUITY:**
+    - If this is a follow-up question, reference the previous conversation naturally
+    - Use phrases like "Following up on your earlier question..." or "Building on what we discussed..."
+    - If user mentioned amounts before, you can reference them: "You mentioned spending $X on..."
+    - Keep conversation flowing naturally from previous topics
+
+    **CRITICAL RULES FOR MISSING DATA:**
+    - If you see null/empty results: "I don't see any [category] purchases in your recent transactions"
+    - If no comparison data: "Let me show you your spending in other categories first"
+    - NEVER say: "analysis provided", "dataset", "not available in current data", "null values"
+
+    **RESPONSE STYLE:**
+    - Start with a direct, natural answer
+    - Be warm and professional like a bank advisor
+    - Reference previous discussions when helpful
+    - Offer helpful next steps
+    - Sound human, not like a computer system
+
+    Analysis Type: {analysis_type}""",
                 ),
                 (
                     "human",
-                    """Based on this REAL analysis of the user's actual spending data:
+                    """Here is the user's actual spending data:
 
-{results}
+    {results}
 
-Please provide a specific, data-driven response to their question: "{user_query}"
+    Please provide a natural, helpful response to their question: "{user_query}"
 
-Focus on the actual numbers and patterns in their spending data.""",
+    Remember: Be conversational, build on previous context, never mention technical details, and handle missing data gracefully.""",
                 ),
             ]
         )
 
         try:
-            results = state.get("raw_data", [])
+            raw_data = state.get("raw_data", [])
 
-            # Ensure we have something to work with
-            if not results:
-                results = [
-                    {
-                        "type": "basic",
-                        "data": {
-                            "message": "Analysis completed but limited data available"
-                        },
-                    }
-                ]
+            if not raw_data:
+                fallback_response = "I wasn't able to find any spending data for your query."
+                
+                # Add context-aware suggestions even for fallbacks
+                if context_string and "spending" in context_string:
+                    fallback_response += " Based on our earlier conversation about your spending, would you like me to look at a different time period or category?"
+                else:
+                    fallback_response += " Let me help you look at your overall spending patterns instead, or you can ask about a specific time period."
+                
+                state["response"] = fallback_response
+                state["execution_path"].append("response_generator")
+                return state
 
-            # Convert to JSON string safely
-            try:
-                results_json = json.dumps(results, indent=2, default=str)
-            except Exception as json_error:
-                results_json = str(results)
+            # Convert raw_data to clean format for LLM
+            clean_results = []
+            
+            for data_chunk in raw_data:
+                results = data_chunk.get("results", [])
+                query_type = data_chunk.get("query_type", "unknown")
+                
+                if results:
+                    # Check if we have meaningful data
+                    has_meaningful_data = False
+                    cleaned_results = []
+                    
+                    for result in results:
+                        cleaned_result = {}
+                        for key, value in result.items():
+                            # Skip null values and include meaningful data
+                            if value is not None:
+                                cleaned_result[key] = value
+                                has_meaningful_data = True
+                        
+                        if cleaned_result:
+                            cleaned_results.append(cleaned_result)
+                    
+                    if has_meaningful_data:
+                        clean_results.append({
+                            "data_type": query_type,
+                            "data": cleaned_results
+                        })
 
-            print(f" [DEBUG] Sending to LLM: {len(results)} analysis results")
-            print(
-                f" [DEBUG] Sample result: {str(results[0])[:200]}..."
-                if results
-                else "No results"
-            )
+            # Convert to JSON string for LLM
+            results_json = json.dumps(clean_results, indent=2, default=str)
+
+            print(f" [DEBUG] Sending cleaned raw data with conversation context to LLM")
+            if context_string:
+                print(f" [DEBUG] Context: {context_string[:100]}...")
 
             response = self.llm.invoke(
                 response_prompt.format_messages(
                     analysis_type=state.get("analysis_type", "personal"),
                     user_query=state["user_query"],
                     results=results_json,
+                    context_section=context_string or "This is the start of our conversation."
                 )
             )
 
             state["response"] = response.content
             state["execution_path"].append("response_generator")
 
-            print(
-                f" [DEBUG] Generated response length: {len(response.content)} characters"
-            )
+            print(f" [DEBUG] Generated contextual response length: {len(response.content)} characters")
 
         except Exception as e:
             print(f"❌ Response generation error: {e}")
-            # Provide a basic response based on available data
-            state["response"] = self._generate_fallback_response(state)
+            
+            # Inline fallback - no external method calls
+            user_query = state["user_query"]
+            raw_data = state.get("raw_data", [])
+            
+            if raw_data:
+                # Try to extract meaningful information from raw data inline
+                fallback_response = f"I processed your query '{user_query}' and found some spending information."
+                
+                # Look for amount data in raw results
+                for data_chunk in raw_data:
+                    results = data_chunk.get("results", [])
+                    if results:
+                        for result in results:
+                            for key, value in result.items():
+                                if 'amount' in key.lower() and value is not None and value > 0:
+                                    fallback_response = f"Based on your query '{user_query}', I found ${value:,.2f}. Would you like me to provide more details about your spending patterns?"
+                                    break
+                            if "${" in fallback_response:  # Found an amount, break out of loops
+                                break
+                        if "${" in fallback_response:
+                            break
+                
+                if "${" not in fallback_response:
+                    fallback_response += " Would you like me to break it down further or look at specific categories?"
+            else:
+                fallback_response = f"I wasn't able to find spending data for your query '{user_query}'. Try asking about your total spending for a specific time period or category."
+            
+            state["response"] = fallback_response
             state["execution_path"].append("response_generator")
 
         return state
+
+    def _build_context_for_prompt(self, conversation_context) -> str:
+        """Build conversation context string for LLM prompt - always called"""
+        
+        if not conversation_context:
+            return "This is the start of our conversation."
+        
+        context_parts = []
+        
+        # Add message count for context
+        context_parts.append(f"This is message #{conversation_context.message_count} in our conversation.")
+        
+        # Add recent topics for continuity
+        if conversation_context.recent_topics:
+            context_parts.append(f"Topics we've discussed: {', '.join(conversation_context.recent_topics)}")
+        
+        # Add recent conversations (last 2 for immediate context)
+        if conversation_context.recent_conversations:
+            context_parts.append("\nRecent conversation:")
+            
+            recent_convs = conversation_context.recent_conversations[-2:]  # Last 2 conversations
+            
+            for i, conv in enumerate(recent_convs, 1):
+                if conv.get("user_query") and conv.get("agent_response"):
+                    # Keep full context but reasonable length
+                    query = conv["user_query"][:150] + "..." if len(conv["user_query"]) > 150 else conv["user_query"]
+                    response = conv["agent_response"][:200] + "..." if len(conv["agent_response"]) > 200 else conv["agent_response"]
+                    
+                    context_parts.append(f"  User: {query}")
+                    context_parts.append(f"  You replied: {response}")
+                    if i < len(recent_convs):  
+                        context_parts.append("  ---")
+        
+    
+        if conversation_context.older_summary:
+            context_parts.append(f"\nEarlier in our conversation: {conversation_context.older_summary}")
+        if conversation_context.key_insights:
+            context_parts.append(f"\nKey insights from our discussion: {', '.join(conversation_context.key_insights)}")
+        
+        return "\n".join(context_parts)
+    
+
+
 
     def _generate_fallback_response(self, state: SpendingAgentState) -> str:
         """Generate a fallback response when main response generation fails"""
@@ -881,9 +1000,13 @@ I have access to your transaction data and can help with various spending analys
         return {"age_min": 25, "age_max": 35, "gender": "M", "income_min": 40000}
 
     def process_query(
-        self, client_id: int, user_query: str, config: Dict = None
+        self, 
+        client_id: int, 
+        user_query: str, 
+        config: Dict = None,
+        conversation_context = None  
     ) -> Dict[str, Any]:
-        """Process a spending query with comprehensive error handling"""
+        
 
         initial_state = SpendingAgentState(
             client_id=client_id,
@@ -897,6 +1020,7 @@ I have access to your transaction data and can help with various spending analys
             error=None,
             execution_path=[],
             analysis_type=None,
+            conversation_context=conversation_context  # Always include context
         )
 
         try:
@@ -924,7 +1048,6 @@ I have access to your transaction data and can help with various spending analys
                 "timestamp": datetime.now().isoformat(),
                 "success": False,
             }
-
 
 def test_full_spending_agent():
     """Test the complete SpendingAgent workflow"""
