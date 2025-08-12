@@ -1,249 +1,615 @@
-# spending_agent.py
-# Comprehensive Spending Agent tools for LangChain + LangGraph
-
-import pandas as pd
-from typing import Dict, Any, Optional
-from datetime import datetime, timedelta
-from banking_agent.data_store.data_store import DataStore
+#all the neccessary imports
+import os
+from dotenv import load_dotenv
 from langchain_core.tools import tool
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+import sys
+from pathlib import Path
+# Import the DataStore 
+from banking_agent.data_store.data_store import DataStore
+# for current time calculation 
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+from typing import Any, Dict, Optional
 
-# Utility to parse date strings
 
-def _parse_date(date_str: str) -> Optional[pd.Timestamp]:
-    try:
-        return pd.to_datetime(date_str)
-    except Exception:
-        return None
+load_dotenv()
+
+
+sys.path.insert(
+    0,
+    os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            os.pardir
+        )
+    )
+)
+
+def get_current_date_context() -> str:
+    """Generate current date context for LLM prompts."""
+    now = datetime.now()
+
+    # Calculate relevant dates
+    last_month_start = (now - relativedelta(months=1)).replace(day=1)
+    last_month_end = now.replace(day=1) - timedelta(days=1)
+    current_month_start = now.replace(day=1)
+    last_year_start = (now.replace(month=1, day=1) - relativedelta(years=1))
+    last_year_end = now.replace(month=1, day=1) - timedelta(days=1)
+
+    context = f"""
+CURRENT DATE CONTEXT:
+
+- Today's date: {now.strftime("%Y-%m-%d")}
+- Current year: {now.year}
+- Current month: {now.strftime("%Y-%m")}
+- Last month: {last_month_start.strftime("%Y-%m-%d")} to {last_month_end.strftime("%Y-%m-%d")}
+- Current month so far: {current_month_start.strftime("%Y-%m-%d")} to {now.strftime("%Y-%m-%d")}
+- Last year: {last_year_start.strftime("%Y-%m-%d")} to {last_year_end.strftime("%Y-%m-%d")}
+
+WHEN USER SAYS:
+
+- "last month" → use dates {last_month_start.strftime("%Y-%m-%d")} to {last_month_end.strftime("%Y-%m-%d")}
+- "this month" → use dates {current_month_start.strftime("%Y-%m-%d")} to {now.strftime("%Y-%m-%d")}
+- "last year" → use dates {last_year_start.strftime("%Y-%m-%d")} to {last_year_end.strftime("%Y-%m-%d")}
+- "recent" or "lately" → use last 30 days: {(now - timedelta(days=30)).strftime("%Y-%m-%d")} to {now.strftime("%Y-%m-%d")}
+"""
+    return context
+
+
+
+# Global DataStore instance for tools
+_datastore: Optional[DataStore] = None
+
+
+def _ensure_datastore() -> DataStore:
+    """Ensure global datastore is initialized."""
+    global _datastore
+    if _datastore is None:
+        _datastore = DataStore(
+            client_csv_path=Path(__file__).parent / "Banking_Data.csv",
+            overall_csv_path=Path(__file__).parent / "overall_data.csv",
+            db_path="banking_data.db",
+        )
+    return _datastore
+
 
 @tool
-def get_spending_summary( client_id: int, start_date: str, end_date: str) -> Dict[str, Any]:
+def generate_sql_for_client_analysis(
+    user_query: str,
+    client_id: int
+) -> Dict[str, Any]:
     """
-    Calculate spending metrics for a client between two dates (inclusive).
+    Generate optimized SQL for client_transactions with current date context.
     """
+    ds = _ensure_datastore()
+    schema = ds.get_schema_info()["client_transactions"]
 
-    print("The get_spending_summary has been called")
-    start = _parse_date(start_date)
-    print(f"the parsed data {start} ")
-    end = _parse_date(end_date)
-    if start is None or end is None:
-        return {"error": "Invalid date format. Use 'YYYY-MM-DD'."}
+    # Get current date context
+    date_context = get_current_date_context()
 
-    df = DataStore().get_client_data(430)
-    if df.empty:
-        print("Data is empty")
-        return {"error": f"No data for client {client_id}."}
-
-    period = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
-    
-    if period.empty:
-        print("123")
-        return {"error": f"No transactions for client {client_id} in {start_date} to {end_date}."}
-    
-    print("Have done analysis lets now print the results __+_+_+_)+_+_)+__)+)___)_+")
-
-    total = float(period['amount'].sum())
-    count = int(period.shape[0])
-    avg = float(period['amount'].mean())
-    med = float(period['amount'].median())
-    days = int(period['date'].dt.date.nunique())
-    daily_avg = total / days
-    mx = float(period['amount'].max())
-    mn = float(period['amount'].min())
-
-    print(f" The Client's total: {total}")
-    print(f"The client's Count of transactions: {count}")
-    print(f"The client's average transactions: {avg}")
-
-    return {
-       
-        "date_range": {"start": start_date, "end": end_date},
-        "total_spending": total,
-        "transaction_count": count,
-        "average_transaction": avg,
-        "median_transaction": med,
-        "spending_days": days,
-        "daily_average": daily_avg,
-        "max_transaction": mx,
-        "min_transaction": mn
+    # Build schema description
+    schema_desc_lines = [
+        "CLIENT_TRANSACTIONS TABLE:",
+        f"Description: {schema['description']}",
+        "",
+        "KEY COLUMNS:"
+    ]
+    important_columns = {
+        "client_id": "INTEGER - Unique client identifier (ALWAYS required in WHERE clause)",
+        "date": "TEXT (YYYY-MM-DD) - Transaction date",
+        "amount": "REAL - Transaction amount in dollars",
+        "mcc_category": "TEXT - Category (restaurants, grocery, etc.)",
+        "merchant_city": "TEXT - City where transaction occurred",
+        "is_weekend": "BOOLEAN - Weekend flag",
+        "is_night_txn": "BOOLEAN - Night transaction flag",
+        "current_age": "INTEGER - Customer age",
+        "gender": "TEXT - Customer gender",
+        "yearly_income": "REAL - Annual income"
     }
+    for col, desc in important_columns.items():
+        schema_desc_lines.append(f"- {col}: {desc}")
+    schema_desc = "\n".join(schema_desc_lines)
+
+    prompt = ChatPromptTemplate.from_messages([
+                ("system", f"""
+            You are an expert SQL generator for banking transaction analysis.
+            Generate efficient SQLite queries against client_transactions. Try making a SQL query which can provide rich, comparative data without deciding the answer inside SQL.
+
+            {date_context}
+
+            {schema_desc}
+
+            CRITICAL REQUIREMENTS:
+            - ALWAYS include WHERE client_id = {client_id}
+            - Use the CURRENT DATE CONTEXT above for date filtering
+            - If the user explicitly mentions specific dates/years (e.g., "2021 or 2023"), you MAY use those exact periods with range filters (YYYY-01-01 to YYYY-12-31). Otherwise, NEVER hardcode years; derive from the provided date context
+            - Use indexed columns: client_id, date, mcc_category, amount
+            - Date format YYYY-MM-DD
+            - Use Aliases in your query
+            - Aggregates: SUM, AVG, COUNT
+            - NOT SELF-DECIDING: never pick a “winner” or collapse to a single answer in SQL.
+            - DO NOT use ORDER BY ... LIMIT 1 to select the max/min period
+            - DO NOT use CASE expressions that compare aggregates to choose a label (e.g., return '2021' vs '2023')
+            - DO NOT use subqueries that filter to only the max/min aggregate
+            - INSTEAD return one row per candidate period/category (e.g., year, month, mcc_category) with the relevant aggregates so the application can decide
+            - Prefer sargable range filters over strftime when possible to leverage indexes:
+            - e.g., date >= 'YYYY-01-01' AND date < 'YYYY+1-01-01'
+            - Try giving a query which provides all the needed comparative data and remains not self-deciding
+            - RETURN ONLY THE SQL QUERY - no explanations or markdown
+
+            EXAMPLES:
+            - "last month spending" → WHERE date >= 'YYYY-MM-01' AND date <= 'YYYY-MM-DD' (use last-month dates from context); GROUP BY day or category as needed
+            - "this year" → WHERE date >= 'YYYY-01-01' AND date <= 'YYYY-MM-DD' (current year to date)
+
+            BAD (self-deciding):
+            SELECT CASE
+            WHEN SUM(CASE WHEN date >= '2021-01-01' AND date <= '2021-12-31' THEN amount ELSE 0 END) >
+                SUM(CASE WHEN date >= '2023-01-01' AND date <= '2023-12-31' THEN amount ELSE 0 END)
+            THEN '2021' ELSE '2023' END AS year_with_most_spending
+            FROM client_transactions
+            WHERE client_id = {client_id};
+
+            BAD (also self-deciding):
+            SELECT strftime('%Y',date) AS year,SUM(amount) AS total_spent
+            FROM client_transactions
+            WHERE client_id = {client_id} AND (date BETWEEN '2021-01-01' AND '2023-12-31')
+            GROUP BY year
+            ORDER BY total_spent DESC
+            LIMIT 1;
+
+            GOOD (comparative, not self-deciding; user named the years):
+            SELECT strftime('%Y',date) AS year,SUM(amount) AS total_spent
+            FROM client_transactions
+            WHERE client_id = {client_id}
+            AND (
+                (date >= '2021-01-01' AND date < '2022-01-01') OR
+                (date >= '2023-01-01' AND date < '2024-01-01')
+            )
+            GROUP BY year
+            ORDER BY year;
+
+            Generate ONLY the SQL query for:
+            """),
+                ("human", "{user_query}")
+            ])
+    try:
+        llm = ChatOpenAI(model="gpt-4o", temperature=0)
+        resp = llm.invoke(prompt.format_messages(user_query=user_query))
+        
+        if not resp or not resp.content:
+            return {"error": "No response from LLM"}
+            
+        sql = resp.content.strip()
+
+        # Strip any fencing or extra text
+        lines = [l.strip() for l in sql.splitlines()]
+        sql_lines, found = [], False
+        for line in lines:
+            if line.upper().startswith("SELECT") or found:
+                found = True
+                sql_lines.append(line)
+        sql = "\n".join(sql_lines).strip("```sql ").strip("```")
+
+        # Fallback: extract first SELECT
+        if not sql.upper().startswith("SELECT"):
+            idx = resp.content.upper().find("SELECT")
+            if idx >= 0:
+                sql = resp.content[idx:].split("\n\n")[0].strip()
+            else:
+                return {"error": f"No valid SQL query generated for: {user_query}"}
+
+        # Validate we have a meaningful SQL query
+        if not sql or len(sql.strip()) < 10:
+            return {"error": f"Generated SQL too short or empty: {sql}"}
+
+        # Validate client_id presence
+        if f"client_id = {client_id}" not in sql:
+            return {"error": f"Missing client_id filter: {sql}"}
+
+        # Check for hardcoded 2023 dates and warn
+        if "2023" in sql:
+            print(f"⚠️ WARNING: Found hardcoded 2023 date in SQL: {sql}")
+
+        return {
+            "sql_query": sql,
+            "query_type": "client_analysis",
+            "client_id": client_id,
+            "original_query": user_query,
+            "optimization_used": "client_id index + compound indexes",
+            "date_context_applied": True
+        }
+
+    except Exception as e:
+        return {"error": f"SQL generation failed: {e}"}
 
 @tool
-def analyze_time_patterns(client_id: int) -> Dict[str, Any]:
+def generate_sql_for_benchmark_analysis(
+    user_query: str,
+    demographic_filters: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """
-    Analyze client spending patterns across different time dimensions.
-    
-    Args:
-        client_id: The client identifier
-    
-    Returns:
-        Dictionary with time-based spending pattern analysis
+    Generate optimized SQL for overall_transactions with current date context.
     """
+    ds = _ensure_datastore()
+    schema = ds.get_schema_info()["overall_transactions"]
+
+    # Get current date context
+    date_context = get_current_date_context()
+
+    # Build schema description
+    schema_desc_lines = [
+        "OVERALL_TRANSACTIONS TABLE:",
+        f"Description: {schema['description']}",
+        "",
+        "KEY COLUMNS:"
+    ]
+    important_columns = {
+        "date": "TEXT (YYYY-MM-DD) - Transaction date",
+        "amount": "REAL - Transaction amount in dollars",
+        "mcc_category": "TEXT - Category (use exact matches: 'Groceries', 'Restaurants', 'Transportation', etc.)",
+        "current_age": "INTEGER - Customer age",
+        "gender": "TEXT - Customer gender",
+        "yearly_income": "REAL - Annual income",
+        "is_weekend": "BOOLEAN - Weekend flag",
+        "is_night_txn": "BOOLEAN - Night transaction flag"
+    }
+    for col, desc in important_columns.items():
+        schema_desc_lines.append(f"- {col}: {desc}")
+    schema_desc = "\n".join(schema_desc_lines)
+
+    # Build filter context
+    filter_ctx = ""
+    if demographic_filters:
+        filter_lines = ["\nAPPLY THESE DEMOGRAPHIC FILTERS:"]
+        for key, val in demographic_filters.items():
+            if key == "gender":
+                filter_lines.append(f"- gender = '{val}'")
+            elif key == "age_min":
+                filter_lines.append(f"- current_age >= {val}")
+            elif key == "age_max":
+                filter_lines.append(f"- current_age <= {val}")
+            elif key == "income_min":
+                filter_lines.append(f"- yearly_income >= {val}")
+            elif key == "income_max":
+                filter_lines.append(f"- yearly_income <= {val}")
+        filter_ctx = "\n".join(filter_lines)
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", f"""
+You are an expert SQL generator for market benchmark analysis.
+Generate SQLite queries against overall_transactions.
+
+{date_context}
+
+{schema_desc}
+{filter_ctx}
+
+CRITICAL REQUIREMENTS:
+- Use the CURRENT DATE CONTEXT above for date filtering
+- NEVER use hardcoded years like 2023 - always use the current dates provided
+- For category comparisons, use exact category names like 'Groceries' (not 'grocery')
+- Aggregates: AVG(), COUNT(), SUM()
+- Group by: mcc_category, current_age, gender
+- Use Aliases in your query
+- Indexed columns: date, mcc_category, current_age, gender, amount
+- ENSURE PROPER SQL SYNTAX - no missing parentheses or incomplete clauses
+- RETURN ONLY THE SQL QUERY - no explanations or markdown
+
+EXAMPLE CATEGORY NAMES: 'Groceries', 'Restaurants', 'Transportation', 'Financial Services', 'Entertainment'
+
+Generate ONLY the SQL query for:
+"""),
+        ("human", "{user_query}")
+    ])
+
     try:
-        data_store = DataStore()
-        client_data = data_store.get_client_data(client_id)
+        llm = ChatOpenAI(model="gpt-4o", temperature=0)
+        resp = llm.invoke(prompt.format_messages(user_query=user_query))
         
-        if client_data.empty:
-            return {"error": f"No data found for client {client_id}"}
-        
-        # Weekend vs Weekday analysis
-        weekend_data = client_data[client_data['is_weekend'] == 1]
-        weekday_data = client_data[client_data['is_weekend'] == 0]
-        
-        # Daily patterns
-        daily_spending = client_data.groupby('day_name')['amount'].agg(['sum', 'count', 'mean']).round(2)
-        
-        # Hourly patterns  
-        hourly_spending = client_data.groupby('txn_hour')['amount'].agg(['sum', 'count', 'mean']).round(2)
-        
-        # Monthly patterns
-        monthly_spending = client_data.groupby(client_data['date'].dt.month)['amount'].agg(['sum', 'count', 'mean']).round(2)
-        
-        # Night vs Day
-        night_data = client_data[client_data['is_night_txn'] == 1]
-        day_data = client_data[client_data['is_night_txn'] == 0]
-        
+        if not resp or not resp.content:
+            return {"error": "No response from LLM"}
+            
+        sql = resp.content.strip()
+
+        # Clean up
+        lines = [l.strip() for l in sql.splitlines()]
+        sql_lines, found = [], False
+        for line in lines:
+            if line.upper().startswith("SELECT") or found:
+                found = True
+                sql_lines.append(line)
+        sql = "\n".join(sql_lines).strip("```sql ").strip("```")
+
+        if not sql.upper().startswith("SELECT"):
+            idx = resp.content.upper().find("SELECT")
+            if idx >= 0:
+                sql = resp.content[idx:].split("\n\n")[0].strip()
+            else:
+                return {"error": f"No valid SQL query generated for: {user_query}"}
+
+        # Validate we have a meaningful SQL query
+        if not sql or len(sql.strip()) < 10:
+            return {"error": f"Generated SQL too short or empty: {sql}"}
+
+        # Check for hardcoded 2023 dates and warn
+        if "2023" in sql:
+            print(f"⚠️ WARNING: Found hardcoded 2023 date in SQL: {sql}")
+
+        # Basic syntax validation
+        if sql.count("(") != sql.count(")"):
+            return {"error": f"SQL syntax error - mismatched parentheses: {sql}"}
+
         return {
-            "weekend_vs_weekday": {
-                "weekend_total": float(weekend_data['amount'].sum()),
-                "weekday_total": float(weekday_data['amount'].sum()),
-                "weekend_avg_transaction": float(weekend_data['amount'].mean()) if len(weekend_data) > 0 else 0,
-                "weekday_avg_transaction": float(weekday_data['amount'].mean()) if len(weekday_data) > 0 else 0,
-                "weekend_percentage": float(weekend_data['amount'].sum() / client_data['amount'].sum() * 100),
-                "weekend_preference": weekend_data['amount'].sum() > weekday_data['amount'].sum()
-            },
-            "daily_patterns": {
-                "by_day": daily_spending.to_dict('index'),
-                "peak_day": daily_spending['sum'].idxmax(),
-                "lowest_day": daily_spending['sum'].idxmin()
-            },
-            "hourly_patterns": {
-                "by_hour": hourly_spending.to_dict('index'),
-                "peak_hour": int(hourly_spending['sum'].idxmax()),
-                "quiet_hour": int(hourly_spending['sum'].idxmin())
-            },
-            "monthly_patterns": {
-                "by_month": monthly_spending.to_dict('index'),
-                "peak_month": int(monthly_spending['sum'].idxmax()),
-                "lowest_month": int(monthly_spending['sum'].idxmin())
-            },
-            "night_vs_day": {
-                "night_total": float(night_data['amount'].sum()),
-                "day_total": float(day_data['amount'].sum()),
-                "night_percentage": float(night_data['amount'].sum() / client_data['amount'].sum() * 100),
-                "night_preference": night_data['amount'].sum() > day_data['amount'].sum()
-            },
-            "behavioral_insights": {
-                "is_weekend_spender": weekend_data['amount'].sum() > weekday_data['amount'].sum(),
-                "is_night_spender": night_data['amount'].sum() > day_data['amount'].sum(),
-                "peak_spending_time": f"{daily_spending['sum'].idxmax()} at {hourly_spending['sum'].idxmax()}:00"
+            "sql_query": sql,
+            "query_type": "benchmark_analysis",
+            "demographic_filters": demographic_filters,
+            "original_query": user_query,
+            "optimization_used": "demographic indexes + compound indexes",
+            "date_context_applied": True
+        }
+
+    except Exception as e:
+        return {"error": f"Benchmark SQL generation failed: {e}"}
+
+@tool
+def generate_sql_for_budget_analysis(
+    user_query: str,
+    client_id: int,
+    analysis_type: str = "budget_performance"
+) -> Dict[str, Any]:
+    """
+    Generate optimized SQL for budget-related queries.
+    """
+    ds = _ensure_datastore()
+    
+    # Get current date context
+    date_context = get_current_date_context()
+    
+    # Get schema info for budget tables
+    budget_schema = ds.get_schema_info().get("user_budgets", {})
+    tracking_schema = ds.get_schema_info().get("budget_tracking", {})
+    
+    # Build comprehensive schema description
+    schema_desc = f"""
+BUDGET ANALYSIS TABLES:
+
+USER_BUDGETS TABLE:
+- client_id: INTEGER - Client identifier (ALWAYS required)
+- category: TEXT - Budget category (matches mcc_category from transactions)
+- monthly_limit: REAL - Monthly budget limit in dollars
+- budget_type: TEXT - Type of budget (fixed, percentage, goal_based)
+- is_active: BOOLEAN - Whether budget is currently active (use = 1)
+
+BUDGET_TRACKING TABLE:
+- client_id: INTEGER - Client identifier (ALWAYS required)
+- month: TEXT - Month in YYYY-MM format
+- category: TEXT - Spending category
+- budgeted_amount: REAL - Budgeted amount for the month
+- actual_amount: REAL - Actual spending for the month
+- variance_amount: REAL - Difference (actual - budgeted)
+- variance_percentage: REAL - Percentage variance
+
+CLIENT_TRANSACTIONS TABLE (for real-time calculations):
+- client_id: INTEGER - Client identifier
+- date: TEXT (YYYY-MM-DD) - Transaction date
+- amount: REAL - Transaction amount
+- mcc_category: TEXT - Spending category
+"""
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", f"""
+You are an expert SQL generator for budget analysis queries.
+Generate efficient SQLite queries for budget management.
+
+{date_context}
+
+{schema_desc}
+
+ANALYSIS TYPES:
+- "budget_performance": Compare budgeted vs actual spending
+- "budget_status": Current budget limits and categories
+- "budget_variance": Identify over/under spending
+- "budget_trends": Historical budget performance
+
+CRITICAL REQUIREMENTS:
+- ALWAYS include WHERE client_id = {client_id}
+- Use CURRENT DATE CONTEXT for date filtering
+- For current month analysis, use strftime('%Y-%m', date) for month comparison
+- Join tables when needed for comprehensive analysis
+- Use meaningful aliases
+- RETURN ONLY THE SQL QUERY - no explanations
+
+COMMON PATTERNS:
+- Current month spending: WHERE strftime('%Y-%m', date) = strftime('%Y-%m', 'now')
+- Budget vs actual: JOIN user_budgets with aggregated client_transactions
+- Variance calculation: (actual_amount - budgeted_amount) AS variance
+
+Generate ONLY the SQL query for:
+"""),
+        ("human", "{user_query}")
+    ])
+
+    try:
+        llm = ChatOpenAI(model="gpt-4o", temperature=0)
+        resp = llm.invoke(prompt.format_messages(user_query=user_query))
+        
+        if not resp or not resp.content:
+            return {"error": "No response from LLM"}
+            
+        sql = resp.content.strip()
+
+        # Clean up SQL
+        lines = [l.strip() for l in sql.splitlines()]
+        sql_lines, found = [], False
+        for line in lines:
+            if line.upper().startswith("SELECT") or found:
+                found = True
+                sql_lines.append(line)
+        sql = "\n".join(sql_lines).strip("```sql ").strip("```")
+
+        # Fallback extraction
+        if not sql.upper().startswith("SELECT"):
+            idx = resp.content.upper().find("SELECT")
+            if idx >= 0:
+                sql = resp.content[idx:].split("\n\n")[0].strip()
+            else:
+                return {"error": f"No valid SQL query generated for: {user_query}"}
+
+        # Validate we have a meaningful SQL query
+        if not sql or len(sql.strip()) < 10:
+            return {"error": f"Generated SQL too short or empty: {sql}"}
+
+        # Validate client_id presence
+        if f"client_id = {client_id}" not in sql:
+            return {"error": f"Missing client_id filter in budget query: {sql}"}
+
+        return {
+            "sql_query": sql,
+            "query_type": "budget_analysis",
+            "analysis_type": analysis_type,
+            "client_id": client_id,
+            "original_query": user_query,
+            "optimization_used": "budget table indexes",
+            "date_context_applied": True
+        }
+
+    except Exception as e:
+        return {"error": f"Budget SQL generation failed: {e}"}
+
+@tool
+def execute_generated_sql(
+    sql_query: str,
+    query_type: str,
+    format_results: bool = True
+) -> Dict[str, Any]:
+    """
+    Execute generated SQL query with performance monitoring and result formatting.
+    """
+    ds = _ensure_datastore()
+
+    try:
+        if not sql_query or not sql_query.strip():
+            return {
+                "error": "Empty or null SQL query provided",
+                "query_executed": sql_query,
+                "query_type": query_type,
+                "execution_timestamp": datetime.now().isoformat()
             }
+            
+        print(f"[DEBUG] Executing SQL: {sql_query[:100]}...")
+        start = datetime.now()
+        rows, cols = ds.execute_sql_query(sql_query)
+        duration = (datetime.now() - start).total_seconds()
+
+        # Safe handling of rows and cols
+        if rows is None:
+            rows = []
+        if cols is None:
+            cols = []
+
+        results = (
+            [dict(zip(cols, r)) for r in rows]
+            if format_results and rows and cols else
+            rows
+        )
+
+        print(f"[DEBUG] SQL executed: {len(rows)} rows in {duration:.3f}s")
+        return {
+            "query_executed": sql_query,
+            "query_type": query_type,
+            "column_names": cols,
+            "results": results,
+            "row_count": len(rows),
+            "execution_time_seconds": round(duration, 3),
+            "execution_timestamp": datetime.now().isoformat()
         }
     except Exception as e:
-        return {"error": f"Error in time pattern analysis: {str(e)}"}
-
-@tool
-def get_spending_by_category(
-    client_id: int,
-    start_date: str,
-    end_date: str,
-    top_n: int = 10
-) -> Dict[str, Any]:
-    """
-    Breakdown of spending by MCC (Merchant Category Code) category over a date range.
-    """
-    start = _parse_date(start_date)
-    end = _parse_date(end_date)
-    if start is None or end is None:
-        return {"error": "Invalid date format."}
-
-    df = DataStore().get_client_data(client_id)
-    period = df[(df['date'] >= start) & (df['date'] <= end)]
-    if period.empty:
-        return {"error": "No transactions in given period."}
-
-    stats = (
-        period.groupby('mcc_category')['amount']
-        .agg(total_spent='sum', transaction_count='count', average_spent='mean')
-        .round(2)
-    )
-    stats['percentage'] = (stats['total_spent'] / stats['total_spent'].sum() * 100).round(1)
-    top = stats.sort_values('total_spent', ascending=False).head(top_n)
-
-    return {
-       
-        "date_range": {"start": start_date, "end": end_date},
-        "category_breakdown": top.to_dict('index')
-    }
-
-@tool
-def get_spending_by_category_date(
-    client_id: int,
-    start_date: str,
-    end_date: str
-) -> Dict[str, Any]:
-    """
-    Time series of category spending: amount per day per MCC category.
-    """
-    start = _parse_date(start_date)
-    end = _parse_date(end_date)
-    if start is None or end is None:
-        return {"error": "Invalid date format."}
-
-    df = DataStore().get_client_data(client_id)
-    period = df[(df['date'] >= start) & (df['date'] <= end)]
-    if period.empty:
-        return {"error": "No transactions in given period."}
-
-    period['date_only'] = period['date'].dt.strftime('%Y-%m-%d')
-    ts = (
-        period.groupby(['date_only', 'mcc_category'])['amount']
-        .sum()
-        .reset_index()
-    )
-    # Pivot: dates as keys mapping to category:amount dicts
-    result: Dict[str, Dict[str, float]] = {}
-    for date, group in ts.groupby('date_only'):
-        result[date] = {
-            row['mcc_category']: float(row['amount']) for _, row in group.iterrows()
+        print(f"[DEBUG] SQL execution failed: {e}")
+        return {
+            "error": f"SQL execution failed: {e}",
+            "query_executed": sql_query,
+            "query_type": query_type,
+            "execution_timestamp": datetime.now().isoformat()
         }
-    return {
+
+@tool 
+def create_or_update_budget(
+    client_id: int,
+    category: str,
+    monthly_limit: float,
+    budget_type: str = "fixed"
+) -> Dict[str, Any]:
+    """
+    Create or update a budget for a specific client and category.
+    """
+    ds = _ensure_datastore()
     
-        "date_series": result
-    }
+    try:
+        success = ds.create_budget(client_id, category, monthly_limit, budget_type)
+        
+        if success:
+            return {
+                "success": True,
+                "message": f"Budget created/updated: {category} = ${monthly_limit:.2f}/month",
+                "client_id": client_id,
+                "category": category,
+                "monthly_limit": monthly_limit,
+                "budget_type": budget_type
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to create/update budget",
+                "client_id": client_id,
+                "category": category
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Budget operation failed: {e}",
+            "client_id": client_id,
+            "category": category
+        }
 
 @tool
-def get_spending_by_night( client_id: int, start_date: str, end_date: str, night_start: int = 22, night_end: int = 6 ) -> Dict[str, Any]:
+def update_budget_tracking_for_month(
+    client_id: int,
+    month: str
+) -> Dict[str, Any]:
     """
-    Analyze spending that occurred during night hours vs day hours.
-    night_start and night_end are hours in 24h format.
+    Update budget tracking calculations for a specific client and month.
+    Format: month should be 'YYYY-MM' (e.g., '2025-07')
     """
-    start = _parse_date(start_date)
-    end = _parse_date(end_date)
-    if start is None or end is None:
-        return {"error": "Invalid date format."}
-
-    df = DataStore().get_client_data(client_id)
-    period = df[(df['date'] >= start) & (df['date'] <= end)]
-    if period.empty:
-        return {"error": "No transactions in given period."}
-
-    # Extract hour
-    period['hour'] = period['date'].dt.hour
-
-    # Night if hour >= night_start or < night_end
-    night_mask = (period['hour'] >= night_start) | (period['hour'] < night_end)
-    night_data = period[night_mask]
-    day_data = period[~night_mask]
-
-    return {
-        "client_id": client_id,
-        "date_range": {"start": start_date, "end": end_date},
-        "night_total": float(night_data['amount'].sum()),
-        "day_total": float(day_data['amount'].sum()),
-        "night_count": int(night_data.shape[0]),
-        "day_count": int(day_data.shape[0]),
-        "night_average": float(night_data['amount'].mean()) if not night_data.empty else 0,
-        "day_average": float(day_data['amount'].mean()) if not day_data.empty else 0
-    }
-
-
+    ds = _ensure_datastore()
+    
+    try:
+        success = ds.update_budget_tracking(client_id, month)
+        
+        if success:
+            # Get the updated tracking data
+            performance_df = ds.get_budget_performance(client_id, month)
+            
+            return {
+                "success": True,
+                "message": f"Budget tracking updated for {month}",
+                "client_id": client_id,
+                "month": month,
+                "categories_tracked": len(performance_df),
+                "tracking_data": performance_df.to_dict('records') if not performance_df.empty else []
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to update budget tracking - no active budgets found",
+                "client_id": client_id,
+                "month": month
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Budget tracking update failed: {e}",
+            "client_id": client_id,
+            "month": month
+        }

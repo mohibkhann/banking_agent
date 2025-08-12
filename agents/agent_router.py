@@ -59,6 +59,7 @@ class AgentRouting(BaseModel):
 
 @dataclass
 class ConversationContext:
+    """Conversation context for memory management"""
     client_id: int
     session_start: datetime
     last_interaction: datetime
@@ -67,8 +68,12 @@ class ConversationContext:
     last_agent_used: Optional[str]
     conversation_summary: str
     key_insights: List[str]
-    recent_conversations: List[Dict[str, Any]]  
-    older_summary: str  
+
+    #for conversation history
+    conversation_history: List[Dict[str, Any]]  
+    last_user_query: Optional[str]  
+    last_agent_response: Optional[str]
+
 
 
 class MultiAgentState(TypedDict):
@@ -187,27 +192,35 @@ class PersonalFinanceRouter:
 
 
     def _context_manager_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Enhanced conversation context and memory management"""
+        """Enhanced conversation context and memory management with better follow-up handling"""
 
         try:
             print("🧠 [DEBUG] Managing conversation context...")
 
-            # Basic query validation
+            # Basic query validation with better follow-up detection
             user_query = state["user_query"].strip()
+            
+            # Handle very short or invalid queries, but allow common follow-ups
+            common_followups = ['ok', 'yes', 'no', 'show', 'tell', 'more', 'continue', 'please']
+            query_words = user_query.lower().split()
             
             if len(user_query) <= 2 and user_query.lower() not in ['no', 'yes', 'ok']:
                 print(f"[DEBUG] ⚠️ Invalid query detected: '{user_query}'")
                 state["error"] = "Please provide a more complete question about your finances."
                 return state
+            elif len(query_words) <= 3 and all(word in common_followups for word in query_words):
+                # This is a follow-up like "ok please show", "yes tell me", etc.
+                print(f"[DEBUG] 🔄 Follow-up command detected: '{user_query}'")
 
             client_id = state["client_id"]
             session_id = state.get("session_id", f"session_{client_id}_{datetime.now().strftime('%Y%m%d')}")
             
-            # Get or create conversation context
             if session_id in self.contexts:
                 context = self.contexts[session_id]
                 context.last_interaction = datetime.now()
                 context.message_count += 1
+                # Store the current query
+                context.last_user_query = user_query
                 print(f"[DEBUG] 📝 Continuing conversation: message #{context.message_count}")
             else:
                 context = ConversationContext(
@@ -219,59 +232,58 @@ class PersonalFinanceRouter:
                     last_agent_used=None,
                     conversation_summary="New conversation started",
                     key_insights=[],
-                    recent_conversations=[],  # NEW: Empty list for recent conversations
-                    older_summary=""  # NEW: Empty summary for older conversations
+                    conversation_history=[],  
+                    last_user_query=user_query,  
+                    last_agent_response=None  
                 )
                 self.contexts[session_id] = context
                 print(f"[DEBUG] 🆕 New conversation started")
+                
 
-            # Enhanced follow-up detection using recent conversations
+            # Enhanced topic detection with context awareness
             query_lower = user_query.lower()
+            last_interaction = context.conversation_history[-1] if context.conversation_history else None
+            
+            # Initialize enhanced_query as None
             state["enhanced_query"] = None
             
+            # For follow-up queries, enhance with context
+            is_followup = False
             # Check for follow-up patterns
-            followup_patterns = ["show me", "tell me more", "what about", "more details", "continue"]
-            is_followup = any(pattern in query_lower for pattern in followup_patterns)
-            
-            if is_followup and context.recent_conversations:
-                print(f"[DEBUG] 🔄 Follow-up detected, using recent conversation context")
-                
-                # Get the most recent conversation
-                last_conversation = context.recent_conversations[-1]
-                last_query = last_conversation.get("user_query", "").lower()
-                last_response = last_conversation.get("agent_response", "").lower()
-                
-                # Enhance query based on last conversation
-                if "spending" in last_query or "spent" in last_response:
-                    if any(word in query_lower for word in ["show", "more", "details"]):
-                        state["enhanced_query"] = f"Show me more details about my spending patterns (follow-up to: {last_conversation['user_query']})"
-                        print(f"[DEBUG] 💡 Enhanced query for spending follow-up")
-                
-                elif "budget" in last_query or "budget" in last_response:
-                    if any(word in query_lower for word in ["show", "tell", "more"]):
-                        state["enhanced_query"] = f"Show me my budget details (follow-up to: {last_conversation['user_query']})"
-                        print(f"[DEBUG] 💡 Enhanced query for budget follow-up")
-                
-                elif "compare" in last_query or "comparison" in last_response:
-                    if any(word in query_lower for word in ["show", "tell"]):
-                        state["enhanced_query"] = f"Show me spending comparisons (follow-up to previous conversation)"
-                        print(f"[DEBUG] 💡 Enhanced query for comparison follow-up")
+            followup_patterns = ["show me", "tell me more", "what about", "how about", "and", "also"]
 
-            # Detect topics from current query
+            if any(pattern in query_lower for pattern in followup_patterns) and last_interaction:
+                last_query = last_interaction.get("user_query", "").lower()
+                last_response = last_interaction.get("agent_response", "").lower()
+                
+                # If last query was about spending and this is a follow-up
+                if "spend" in last_query and any(word in query_lower for word in ["show", "tell", "more"]):
+                    state["enhanced_query"] = f"Show me more details about my spending patterns (follow-up to: {last_interaction['user_query']})"
+                    is_followup = True
+                
+                # If last response mentioned categories and user wants to see them
+                elif "categories" in last_response and any(word in query_lower for word in ["show", "categories"]):
+                    state["enhanced_query"] = f"Show me my spending breakdown by categories (follow-up to previous conversation)"
+                    is_followup = True
+            
+            # Detect topics from current query (enhanced or original)
+            # Use enhanced query if available, otherwise use original
             enhanced_query = state.get("enhanced_query")
-            query_to_analyze = enhanced_query if enhanced_query else user_query
-            analyzed_lower = query_to_analyze.lower()
+            if enhanced_query:
+                enhanced_lower = enhanced_query.lower()
+            else:
+                enhanced_lower = query_lower  # Use original query if no enhancement
             
             detected_topics = []
             
-            if any(word in analyzed_lower for word in ["budget", "create", "set up", "overspend", "allocate"]):
+            if any(word in enhanced_lower for word in ["budget", "create", "set up", "overspend", "allocate"]):
                 detected_topics.append("budget")
-            if any(word in analyzed_lower for word in ["spend", "spent", "spending", "transaction", "category", "total"]):
+            if any(word in enhanced_lower for word in ["spend", "spent", "spending", "transaction", "category", "total", "where did i"]):
                 detected_topics.append("spending")
-            if any(word in analyzed_lower for word in ["compare", "comparison", "vs", "versus", "average", "similar"]):
-                detected_topics.append("comparison")
-            if any(word in analyzed_lower for word in ["save", "savings", "saved"]):
+            if any(word in enhanced_lower for word in ["save", "savings", "saved"]):
                 detected_topics.append("savings")
+            if any(word in enhanced_lower for word in ["compare", "comparison", "vs", "versus", "against", "average", "similar"]):
+                detected_topics.append("comparison")
             
             # Add detected topics to recent topics
             for topic in detected_topics:
@@ -281,6 +293,9 @@ class PersonalFinanceRouter:
 
             # Keep only recent topics (last 5)
             context.recent_topics = context.recent_topics[-5:]
+            
+            if is_followup:
+                print(f"[DEBUG] 🔄 Follow-up context: {context.last_agent_used or 'previous'} agent, topics: {context.recent_topics}")
 
             state["conversation_context"] = context
             state["session_id"] = session_id
@@ -293,7 +308,6 @@ class PersonalFinanceRouter:
             state["error"] = f"Context management failed: {e}"
 
         return state
-
 
     def _query_router_node(self, state: MultiAgentState) -> MultiAgentState:
         """Intelligent query routing with improved domain detection"""
@@ -523,44 +537,43 @@ class PersonalFinanceRouter:
                 return "spending", "Default routing to spending agent"
 
     def _spending_agent_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Execute spending agent query with conversation context"""
+        """Execute spending agent query with context-aware processing"""
 
         try:
             print("📊 [DEBUG] Executing spending agent query...")
 
+            # Ensure we have a valid query to process
             original_query = state.get("user_query")
             enhanced_query = state.get("enhanced_query")
+            
+            # Use enhanced query if available AND not None, otherwise use original
             query_to_process = enhanced_query if enhanced_query else original_query
             
+            # Safety check - ensure query_to_process is not None
             if not query_to_process:
-                print(f"[DEBUG] ❌ No valid query to process")
+                print(f"[DEBUG] ❌ No valid query to process. Original: {original_query}, Enhanced: {enhanced_query}")
                 state["error"] = "No valid query provided to spending agent"
                 state["primary_response"] = "I couldn't process your query. Please try asking about your spending again."
                 return state
             
-            # Always pass conversation context
-            context = state.get("conversation_context")
-            
             if enhanced_query:
-                print(f"[DEBUG] 💡 Processing enhanced query with context")
+                print(f"[DEBUG] 💡 Processing enhanced query: {query_to_process}")
             else:
-                print(f"[DEBUG] 📝 Processing original query with context")
+                print(f"[DEBUG] 📝 Processing original query: {query_to_process}")
 
-            # Always pass context to spending agent
             result = self.spending_agent.process_query(
                 client_id=state["client_id"],
-                user_query=query_to_process,
-                conversation_context=context  # Always pass context
+                user_query=query_to_process  # Now guaranteed to be non-None
             )
 
             state["primary_response"] = result.get("response")
             
             # Update context
-            if context:
-                context.last_agent_used = "spending"
+            if state.get("conversation_context"):
+                state["conversation_context"].last_agent_used = "spending"
 
             state["execution_path"].append("spending_agent")
-            print(f"✅ Spending agent completed with context: {result.get('success', False)}")
+            print(f"✅ Spending agent completed: {result.get('success', False)}")
 
         except Exception as e:
             print(f"❌ Spending agent error: {e}")
@@ -568,46 +581,46 @@ class PersonalFinanceRouter:
             state["primary_response"] = None
 
         return state
+    
 
     def _budget_agent_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Execute budget agent query with conversation context"""
+        """Execute budget agent query with context-aware processing"""
 
         try:
             print("💰 [DEBUG] Executing budget agent query...")
 
+            # Ensure we have a valid query to process
             original_query = state.get("user_query")
             enhanced_query = state.get("enhanced_query")
+            
+            # Use enhanced query if available AND not None, otherwise use original
             query_to_process = enhanced_query if enhanced_query else original_query
             
+            # Safety check - ensure query_to_process is not None
             if not query_to_process:
-                print(f"[DEBUG] ❌ No valid query to process")
+                print(f"[DEBUG] ❌ No valid query to process. Original: {original_query}, Enhanced: {enhanced_query}")
                 state["error"] = "No valid query provided to budget agent"
                 state["primary_response"] = "I couldn't process your query. Please try asking about your budget again."
                 return state
             
-            # Always pass conversation context
-            context = state.get("conversation_context")
-            
             if enhanced_query:
-                print(f"[DEBUG] 💡 Processing enhanced query with context")
+                print(f"[DEBUG] 💡 Processing enhanced query: {query_to_process}")
             else:
-                print(f"[DEBUG] 📝 Processing original query with context")
+                print(f"[DEBUG] 📝 Processing original query: {query_to_process}")
 
-            # Always pass context to budget agent
             result = self.budget_agent.process_query(
                 client_id=state["client_id"],
-                user_query=query_to_process,
-                conversation_context=context  # Always pass context
+                user_query=query_to_process  # Now guaranteed to be non-None
             )
 
             state["primary_response"] = result.get("response")
             
             # Update context
-            if context:
-                context.last_agent_used = "budget"
+            if state.get("conversation_context"):
+                state["conversation_context"].last_agent_used = "budget"
 
             state["execution_path"].append("budget_agent")
-            print(f"✅ Budget agent completed with context: {result.get('success', False)}")
+            print(f"✅ Budget agent completed: {result.get('success', False)}")
 
         except Exception as e:
             print(f"❌ Budget agent error: {e}")
@@ -615,7 +628,6 @@ class PersonalFinanceRouter:
             state["primary_response"] = None
 
         return state
-
 
     def _response_synthesizer_node(self, state: MultiAgentState) -> MultiAgentState:
         """Enhanced response synthesis with better handling of irrelevant queries"""
@@ -677,209 +689,72 @@ class PersonalFinanceRouter:
         return state
     
 
-
-    def _create_conversation_summary(self, conversation: Dict[str, Any]) -> str:
-        """Create a concise summary of a conversation"""
-        
-        query = conversation.get("user_query", "")
-        response = conversation.get("agent_response", "")
-        agent = conversation.get("agent_used", "")
-        topics = conversation.get("topics", [])
-        
-        # Extract key information
-        summary_parts = []
-        
-        # Add main topic
-        if topics:
-            summary_parts.append(f"{topics[0]}")
-        
-        # Add monetary amounts if present
-        import re
-        amounts = re.findall(r'\$[\d,]+(?:\.\d{2})?', response)
-        if amounts:
-            summary_parts.append(f"{amounts[0]}")
-        
-        # Add action if identifiable
-        if "create" in query.lower() or "budget" in query.lower():
-            summary_parts.append("budget creation")
-        elif "compare" in query.lower():
-            summary_parts.append("comparison")
-        elif "spend" in query.lower():
-            summary_parts.append("spending analysis")
-        
-        return f"{agent}: {', '.join(summary_parts)}" if summary_parts else f"{agent}: general query"
-
-    def _extract_insights(self, context: ConversationContext, response: str) -> None:
-        """Extract key insights from response"""
-        
-        # Extract monetary insights
-        import re
-        amounts = re.findall(r'\$[\d,]+(?:\.\d{2})?', response)
-        if amounts:
-            insight = f"Discussed amount: {amounts[0]}"
-            if insight not in context.key_insights:
-                context.key_insights.append(insight)
-        
-        # Extract category insights
-        categories = ["groceries", "restaurants", "clothing", "transportation", "entertainment", "budget"]
-        for category in categories:
-            if category in response.lower():
-                insight = f"Discussed {category}"
-                if insight not in context.key_insights:
-                    context.key_insights.append(insight)
-                    break
-        
-        # Keep only last 5 insights
-        context.key_insights = context.key_insights[-5:]
-
-    def _update_conversation_summary(self, context: ConversationContext) -> None:
-        """Update overall conversation summary"""
-        
-        if context.message_count <= 3:
-            # Early conversation
-            topics = ", ".join(context.recent_topics) if context.recent_topics else "general finance"
-            context.conversation_summary = f"Early conversation about {topics}"
-        else:
-            # Ongoing conversation
-            recent_topics = ", ".join(context.recent_topics[-3:]) if context.recent_topics else "various topics"
-            agents_used = set()
-            for conv in context.recent_conversations:
-                if conv.get("agent_used"):
-                    agents_used.add(conv["agent_used"])
-            
-            context.conversation_summary = f"Ongoing discussion: {recent_topics}. Agents: {', '.join(agents_used)}"
-
-    # Enhanced get_conversation_summary method
-
-    def get_conversation_summary(self, session_id: str) -> Dict[str, Any]:
-        """Get conversation summary for a session"""
-        
-        if session_id in self.contexts:
-            context = self.contexts[session_id]
-            
-            # Format recent conversations for display
-            recent_display = []
-            for conv in context.recent_conversations:
-                recent_display.append({
-                    "query": conv["user_query"][:100] + "..." if len(conv["user_query"]) > 100 else conv["user_query"],
-                    "response_preview": conv["agent_response"][:100] + "..." if len(conv["agent_response"]) > 100 else conv["agent_response"],
-                    "agent": conv["agent_used"],
-                    "timestamp": conv["timestamp"]
-                })
-            
-            return {
-                "session_id": session_id,
-                "client_id": context.client_id,
-                "session_start": context.session_start.isoformat(),
-                "message_count": context.message_count,
-                "recent_topics": context.recent_topics,
-                "last_agent_used": context.last_agent_used,
-                "key_insights": context.key_insights,
-                "conversation_summary": context.conversation_summary,
-                "recent_conversations": recent_display,
-                "older_summary": context.older_summary,
-                "total_conversations": len(context.recent_conversations)
-            }
-        else:
-            return {"error": "Session not found"}
-
-    # Method to get context for LLM prompts (when needed)
-
-    def get_conversation_context_for_llm(self, session_id: str) -> str:
-        """Get conversation context for LLM prompts (when follow-up enhancement is needed)"""
-        
-        if session_id not in self.contexts:
-            return ""
-        
-        context = self.contexts[session_id]
-        
-        if not context.recent_conversations:
-            return ""
-        
-        # Build context string from recent conversations
-        context_parts = []
-        
-        # Add recent topics
-        if context.recent_topics:
-            context_parts.append(f"Recent topics: {', '.join(context.recent_topics[-3:])}")
-        
-        # Add last conversation for context
-        if context.recent_conversations:
-            last_conv = context.recent_conversations[-1]
-            context_parts.append(f"Last Q: {last_conv['user_query'][:80]}...")
-            context_parts.append(f"Last A: {last_conv['agent_response'][:80]}...")
-        
-        # Add older summary if exists
-        if context.older_summary:
-            context_parts.append(f"Earlier: {context.older_summary}")
-        
-        return " | ".join(context_parts)
-
-
     def _memory_updater_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Update conversation memory: Keep last 3 conversations + summarize older ones"""
 
         try:
             print("💾 [DEBUG] Updating conversation memory...")
 
             context = state.get("conversation_context")
             if context:
-                # Create current conversation record
-                current_conversation = {
+                # Store the current interaction
+                current_interaction = {
                     "timestamp": datetime.now().isoformat(),
-                    "user_query": context.recent_conversations[-1]["user_query"] if context.recent_conversations else state.get("user_query", ""),
-                    "agent_response": state.get("final_response", ""),
+                    "user_query": context.last_user_query,
+                    "agent_response": state.get("final_response"),
                     "agent_used": state.get("routing_decision", {}).get("primary_agent"),
-                    "topics": context.recent_topics.copy(),
+                    "analysis_type": state.get("routing_decision", {}).get("analysis_type"),
                     "success": state.get("error") is None
                 }
                 
-                # Add to recent conversations
-                context.recent_conversations.append(current_conversation)
+                # Add to conversation history
+                context.conversation_history.append(current_interaction)
                 
-                # If we now have more than 3 conversations, move the oldest to summary
-                if len(context.recent_conversations) > 3:
-                    # Take the oldest conversation for summarization
-                    oldest_conversation = context.recent_conversations.pop(0)
-                    
-                    # Add to older summary
-                    summary_entry = self._create_conversation_summary(oldest_conversation)
-                    
-                    if context.older_summary:
-                        context.older_summary += f" | {summary_entry}"
-                    else:
-                        context.older_summary = summary_entry
-                    
-                    # Keep summary concise (last 200 chars to avoid token bloat)
-                    if len(context.older_summary) > 200:
-                        context.older_summary = "..." + context.older_summary[-197:]
-                    
-                    print(f"[DEBUG] 💾 Moved oldest conversation to summary")
+                # Store the response for potential follow-up queries
+                context.last_agent_response = state.get("final_response")
                 
-                # Update agent tracking
-                routing_decision = state.get("routing_decision", {})
-                if routing_decision.get("primary_agent"):
-                    context.last_agent_used = routing_decision["primary_agent"]
+                # Keep only last 10 interactions to prevent memory bloat
+                context.conversation_history = context.conversation_history[-10:]
                 
-                # Extract key insights from current response
-                final_response = state.get("final_response", "")
-                if final_response:
-                    self._extract_insights(context, final_response)
+                # Update conversation summary based on recent interactions
+                if len(context.conversation_history) >= 2:
+                    recent_queries = [h["user_query"] for h in context.conversation_history[-3:]]
+                    context.conversation_summary = f"Recent topics: {', '.join(context.recent_topics)}. Last queries: {'; '.join(recent_queries[-2:])}"
                 
-                # Update conversation summary
-                self._update_conversation_summary(context)
-                
-                print(f"[DEBUG] 💾 Memory updated: {len(context.recent_conversations)} recent conversations")
-                if context.older_summary:
-                    print(f"[DEBUG] 📚 Older summary: {context.older_summary[:100]}...")
+                # Extract key insights from the response
+                if state.get("final_response"):
+                    response = state["final_response"]
+                    if "$" in response and any(word in response.lower() for word in ["spent", "budget", "total"]):
+                        # Extract monetary insights
+                        import re
+                        amounts = re.findall(r'\$[\d,]+(?:\.\d{2})?', response)
+                        if amounts:
+                            insight = f"Recent discussion: {amounts[0]} mentioned"
+                            if insight not in context.key_insights:
+                                context.key_insights.append(insight)
+
+                # Keep only recent insights
+                context.key_insights = context.key_insights[-5:]
+
+                print(f"[DEBUG] 💾 Stored interaction: {context.last_user_query[:50]}... -> {len(state.get('final_response', ''))} chars")
+                print(f"[DEBUG] 📚 Total conversation history: {len(context.conversation_history)} interactions")
 
             state["execution_path"].append("memory_updater")
-            print("✅ Memory updated with conversation history")
+            print("✅ Memory updated with query-response history")
 
         except Exception as e:
             print(f"❌ Memory update error: {e}")
 
         return state
+    
+
+    
+    def get_conversation_history(self, session_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+        if session_id in self.contexts:
+            context = self.contexts[session_id]
+            return context.conversation_history[-limit:] if context.conversation_history else []
+        else:
+            return []
+
 
     def _irrelevant_handler_node(self, state: MultiAgentState) -> MultiAgentState:
         """Handle irrelevant queries with natural, helpful responses"""
@@ -1046,7 +921,10 @@ class PersonalFinanceRouter:
                     recent_topics=[],
                     last_agent_used=None,
                     conversation_summary="",
-                    key_insights=[]
+                    key_insights=[],
+                    conversation_history=[],
+                    last_user_query=user_query,
+                    last_agent_response=None
                 )
                 message_count = default_context.message_count
 

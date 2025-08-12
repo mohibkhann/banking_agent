@@ -3,6 +3,8 @@ import operator
 from datetime import datetime
 from typing import Any, Dict, List, Optional, TypedDict, Annotated
 
+import numpy as np
+import pandas as pd
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
@@ -25,14 +27,13 @@ sys.path.insert(
 )
 
 # Import the updated DataStore and tools
-from data_store.data_store import (
-    DataStore,
+from data_store.data_store import DataStore
+from banking_agent.tools.tools import (
     generate_sql_for_client_analysis,
     generate_sql_for_budget_analysis,
     execute_generated_sql,
     create_or_update_budget,
-    update_budget_tracking_for_month
-)
+    update_budget_tracking_for_month)
 
 load_dotenv()
 
@@ -78,9 +79,6 @@ class BudgetAgentState(TypedDict):
     error: Optional[str]
     execution_path: List[str]
     analysis_type: Optional[str]
-    conversation_context: Optional[Any] 
-
-    
 
 
 class BudgetAgent:
@@ -501,10 +499,7 @@ Analyze this budget query and provide structured classification:""",
         return state
 
     def _response_generator_node(self, state: BudgetAgentState) -> BudgetAgentState:
-        """Generate natural budget management response with conversation context"""
-
-        # Always build context string (empty if no context)
-        context_string = self._build_context_for_prompt(state.get("conversation_context"))
+        """Generate natural budget management response"""
 
         response_prompt = ChatPromptTemplate.from_messages(
             [
@@ -512,46 +507,35 @@ Analyze this budget query and provide structured classification:""",
                     "system",
                     """You are a helpful personal bank's budget advisor analyzing the user's financial data.
 
-    The user asked: "{user_query}"
+The user asked: "{user_query}"
 
-    CONVERSATION CONTEXT:
-    {context_section}
+You have access to their real budget and spending data. Your job is to:
 
-    You have access to their real budget and spending data. Your job is to:
+1. **Answer directly and naturally** - Sound like a knowledgeable financial advisor
+2. **Use the actual numbers** from the data provided
+3. **Be practical and actionable** - Give specific budget advice
+4. **Provide insights** - Point out spending patterns, budget performance, areas for improvement
+5. **Be encouraging** - Frame advice positively and help them achieve their goals
 
-    1. **Answer directly and naturally** - Sound like a knowledgeable financial advisor
-    2. **Use the actual numbers** from the data provided
-    3. **Build on previous conversations** - Reference earlier discussions when relevant
-    4. **Be practical and actionable** - Give specific budget advice
-    5. **Provide insights** - Point out spending patterns, budget performance, areas for improvement
-    6. **Be encouraging** - Frame advice positively and help them achieve their goals
+**Response Style:**
+- Start directly with the answer or insight
+- Use natural, conversational language
+- Give specific recommendations when possible
+- Act as an emplyee of bank
+- Highlight both successes and areas for improvement
+- Never mention technical details like "SQL" or "database"
 
-    **CONVERSATION CONTINUITY:**
-    - If this is a follow-up question, reference the previous conversation naturally
-    - Use phrases like "Following up on the budget we discussed..." or "Building on your earlier question..."
-    - If user mentioned amounts or budgets before, you can reference them
-    - Keep conversation flowing naturally from previous topics
-
-    **RESPONSE STYLE:**
-    - Start directly with the answer or insight
-    - Use natural, conversational language
-    - Give specific recommendations when possible
-    - Act as an employee of bank
-    - Highlight both successes and areas for improvement
-    - Reference previous discussions when helpful
-    - Never mention technical details like "SQL" or "database"
-
-    Analysis Type: {analysis_type}""",
+Analysis Type: {analysis_type}""",
                 ),
                 (
                     "human",
                     """Here is the user's actual budget and spending data:
 
-    {budget_data}
+{budget_data}
 
-    Please answer their budget question naturally: "{user_query}"
+Please answer their budget question naturally: "{user_query}"
 
-    Focus on practical budget advice using the real data shown above. Build on previous conversations when relevant.""",
+Focus on practical budget advice using the real data shown above.""",
                 ),
             ]
         )
@@ -560,17 +544,11 @@ Analyze this budget query and provide structured classification:""",
             raw_data = state.get("raw_data", [])
 
             if not raw_data:
-                fallback_response = "I wasn't able to find any budget or spending data for your query."
-                
-                if context_string and "budget" in context_string:
-                    fallback_response += " Based on our earlier conversation about budgeting, would you like me to help you set up a budget for a specific category?"
-                else:
-                    fallback_response += " Let me help you set up a budget first!"
-                
-                state["response"] = fallback_response
+                state["response"] = "I wasn't able to find any budget or spending data for your query. Let me help you set up a budget first!"
                 state["execution_path"].append("response_generator")
                 return state
 
+            # Extract and format data for LLM
             clean_results = []
             
             for data_chunk in raw_data:
@@ -586,24 +564,22 @@ Analyze this budget query and provide structured classification:""",
             # Convert to clean format
             budget_data_text = json.dumps(clean_results, indent=2, default=str)
 
-            print(f" [DEBUG] Sending budget data with conversation context to LLM:")
+            print(f" [DEBUG] Sending budget data to LLM:")
             print(f" - Number of data sets: {len(clean_results)}")
-            if context_string:
-                print(f" - Context: {context_string[:100]}...")
+            print(f" - Sample: {budget_data_text[:300]}...")
 
             response = self.llm.invoke(
                 response_prompt.format_messages(
                     analysis_type=state.get("analysis_type", "budget_tracking"),
                     user_query=state["user_query"],
                     budget_data=budget_data_text,
-                    context_section=context_string or "This is the start of our conversation."
                 )
             )
 
             state["response"] = response.content
             state["execution_path"].append("response_generator")
 
-            print(f" [DEBUG] Generated contextual budget response length: {len(response.content)} characters")
+            print(f" [DEBUG] Generated budget response length: {len(response.content)} characters")
 
         except Exception as e:
             print(f"❌ Budget response generation error: {e}")
@@ -611,48 +587,6 @@ Analyze this budget query and provide structured classification:""",
             state["execution_path"].append("response_generator")
 
         return state
-
-    def _build_context_for_prompt(self, conversation_context) -> str:
-        """Build conversation context string for budget LLM prompt - always called"""
-        
-        if not conversation_context:
-            return "This is the start of our conversation."
-        
-        context_parts = []
-        
-        # Add message count for context
-        context_parts.append(f"This is message #{conversation_context.message_count} in our conversation.")
-        
-        # Add recent topics for continuity
-        if conversation_context.recent_topics:
-            context_parts.append(f"Topics we've discussed: {', '.join(conversation_context.recent_topics)}")
-        
-        # Add recent conversations (last 2 for immediate context)
-        if conversation_context.recent_conversations:
-            context_parts.append("\nRecent conversation:")
-            
-            recent_convs = conversation_context.recent_conversations[-2:]  # Last 2 conversations
-            
-            for i, conv in enumerate(recent_convs, 1):
-                if conv.get("user_query") and conv.get("agent_response"):
-                    # Keep full context but reasonable length
-                    query = conv["user_query"][:150] + "..." if len(conv["user_query"]) > 150 else conv["user_query"]
-                    response = conv["agent_response"][:200] + "..." if len(conv["agent_response"]) > 200 else conv["agent_response"]
-                    
-                    context_parts.append(f"  User: {query}")
-                    context_parts.append(f"  You replied: {response}")
-                    if i < len(recent_convs):  # Add separator between conversations
-                        context_parts.append("  ---")
-        
-        # Add older summary if exists
-        if conversation_context.older_summary:
-            context_parts.append(f"\nEarlier in our conversation: {conversation_context.older_summary}")
-        
-        # Add key insights
-        if conversation_context.key_insights:
-            context_parts.append(f"\nKey insights from our discussion: {', '.join(conversation_context.key_insights)}")
-        
-        return "\n".join(context_parts)
 
     def _generate_budget_fallback_response(self, state: BudgetAgentState) -> str:
         """Generate fallback budget response when main generation fails"""
@@ -730,13 +664,9 @@ I can help you with budget management, spending analysis, and financial planning
         return "analyze_budget"
 
     def process_query(
-        self, 
-        client_id: int, 
-        user_query: str, 
-        config: Dict = None,
-        conversation_context = None  # Add this parameter
+        self, client_id: int, user_query: str, config: Dict = None
     ) -> Dict[str, Any]:
-        """Process a budget management query with conversation context"""
+        """Process a budget management query"""
 
         initial_state = BudgetAgentState(
             client_id=client_id,
@@ -750,7 +680,6 @@ I can help you with budget management, spending analysis, and financial planning
             error=None,
             execution_path=[],
             analysis_type=None,
-            conversation_context=conversation_context  
         )
 
         try:
@@ -768,6 +697,7 @@ I can help you with budget management, spending analysis, and financial planning
                 "timestamp": datetime.now().isoformat(),
                 "success": final_state.get("error") is None,
             }
+        
 
         except Exception as e:
             print(f"❌ Budget graph execution error: {e}")
@@ -779,6 +709,7 @@ I can help you with budget management, spending analysis, and financial planning
                 "timestamp": datetime.now().isoformat(),
                 "success": False,
             }
+
 
 def test_budget_agent():
     """Test the complete BudgetAgent workflow"""
@@ -800,6 +731,7 @@ def test_budget_agent():
             "Where am I overspending?",
             "Set up a $300 budget for restaurants"
         ]
+
 
         for query in test_queries:
             print(f"\n💰 Testing: '{query}'")

@@ -1,211 +1,339 @@
-# 1. UPDATE the ConversationContext dataclass in agent_router.py
+python -m banking_agent.agents.agent_router
+(agentenv) PS C:\Users\mohib.alikhan\Desktop\Banking-Agent> python -m banking_agent.agents.agent_router
+🤖 PERSONAL FINANCE CHAT DEMO
+============================================================
+💬 Chatting as User ID: 430
+🔧 Type 'quit' to exit, 'test' for simple test
+============================================================
+Initializing PersonalFinanceRouter...
+Data sources: Client CSV, Overall CSV
+Memory enabled: False
+🔄 Loading Spending Agent...
+🚀 Initializing SpendingAgent with SQL-first approach...
+📥 Client data: /Users/mohibalikhan/Desktop/banking-agent/banking_agent/Banking_Data.csv
+📊 Overall data: /Users/mohibalikhan/Desktop/banking-agent/banking_agent/overall_data.csv
+INFO:data_store.data_store:✅ Connected to SQLite DB at banking_data.db
+✅ DB has data: 5,110,524 client + 5,110,524 overall transactions
+⚠️ CSV not found: [WinError 3] The system cannot find the path specified: '/Users/mohibalikhan/Desktop/banking-agent/banking_agent/Banking_Data.csv', using existing DB
+✅ Using existing database (CSV loading skipped)
+✅ Budget tables ensured
+INFO:data_store.data_store:✅ DataStore ready for queries.
+✅ SpendingAgent initialized with SQL-first capabilities!
+💰 Loading Budget Agent...
+💰 Initializing BudgetAgent with budget management capabilities...
+📥 Client data: /Users/mohibalikhan/Desktop/banking-agent/banking_agent/Banking_Data.csv
+📊 Overall data: /Users/mohibalikhan/Desktop/banking-agent/banking_agent/overall_data.csv
+INFO:data_store.data_store:✅ Connected to SQLite DB at banking_data.db
+✅ DB has data: 5,110,524 client + 5,110,524 overall transactions
+⚠️ CSV not found: [WinError 3] The system cannot find the path specified: '/Users/mohibalikhan/Desktop/banking-agent/banking_agent/Banking_Data.csv', using existing DB
+✅ Using existing database (CSV loading skipped)
+✅ Budget tables ensured
+INFO:data_store.data_store:✅ DataStore ready for queries.
+✅ BudgetAgent initialized with budget management capabilities!
+✅ PersonalFinanceRouter initialized successfully!
 
-@dataclass
-class ConversationContext:
-“”“Enhanced conversation context with query-response history”””
-client_id: int
-session_start: datetime
-last_interaction: datetime
-message_count: int
-recent_topics: List[str]
-last_agent_used: Optional[str]
-conversation_summary: str
-key_insights: List[str]
-# NEW: Add conversation history
-conversation_history: List[Dict[str, Any]]  # Store query-response pairs
-last_user_query: Optional[str]  # Store most recent query
-last_agent_response: Optional[str]  # Store most recent response
+🎬 **SIMPLE TEST MODE**
+Session ID: demo_session_20250812_1127
+----------------------------------------
 
-# 2. UPDATE the _context_manager_node to initialize new fields
-
-def _context_manager_node(self, state: MultiAgentState) -> MultiAgentState:
-“”“Enhanced conversation context and memory management with better follow-up handling”””
-
-```
-try:
-    print("🧠 [DEBUG] Managing conversation context...")
-
-    # ... existing validation code ...
-
-    client_id = state["client_id"]
-    session_id = state.get("session_id", f"session_{client_id}_{datetime.now().strftime('%Y%m%d')}")
-    
-    # Get or create conversation context
-    if session_id in self.contexts:
-        context = self.contexts[session_id]
-        context.last_interaction = datetime.now()
-        context.message_count += 1
-        # Store the current query
-        context.last_user_query = user_query
-        print(f"[DEBUG] 📝 Continuing conversation: message #{context.message_count}")
-    else:
-        context = ConversationContext(
-            client_id=client_id,
-            session_start=datetime.now(),
-            last_interaction=datetime.now(),
-            message_count=1,
-            recent_topics=[],
-            last_agent_used=None,
-            conversation_summary="New conversation started",
-            key_insights=[],
-            conversation_history=[],  # NEW: Initialize empty history
-            last_user_query=user_query,  # NEW: Store current query
-            last_agent_response=None  # NEW: Will be set after response
-        )
-        self.contexts[session_id] = context
-        print(f"[DEBUG] 🆕 New conversation started")
-
-    # ... rest of existing topic detection code ...
-
-    state["conversation_context"] = context
-    state["session_id"] = session_id
-    state["execution_path"].append("context_manager")
-
-    print(f"[DEBUG] Context: {context.message_count} messages, topics: {context.recent_topics}, last agent: {context.last_agent_used or 'None'}")
-
-except Exception as e:
-    print(f"❌ Context management error: {e}")
-    state["error"] = f"Context management failed: {e}"
-
-return state
-```
-
-# 3. UPDATE the _memory_updater_node to store query-response pairs
-
-def _memory_updater_node(self, state: MultiAgentState) -> MultiAgentState:
-“”“Update conversation memory and context with query-response history”””
-
-```
-try:
-    print("💾 [DEBUG] Updating conversation memory...")
-
-    context = state.get("conversation_context")
-    if context:
-        # Store the current interaction
-        current_interaction = {
-            "timestamp": datetime.now().isoformat(),
-            "user_query": context.last_user_query,
-            "agent_response": state.get("final_response"),
-            "agent_used": state.get("routing_decision", {}).get("primary_agent"),
-            "analysis_type": state.get("routing_decision", {}).get("analysis_type"),
-            "success": state.get("error") is None
-        }
-        
-        # Add to conversation history
-        context.conversation_history.append(current_interaction)
-        
-        # Store the response for potential follow-up queries
-        context.last_agent_response = state.get("final_response")
-        
-        # Keep only last 10 interactions to prevent memory bloat
-        context.conversation_history = context.conversation_history[-10:]
-        
-        # Update conversation summary based on recent interactions
-        if len(context.conversation_history) >= 2:
-            recent_queries = [h["user_query"] for h in context.conversation_history[-3:]]
-            context.conversation_summary = f"Recent topics: {', '.join(context.recent_topics)}. Last queries: {'; '.join(recent_queries[-2:])}"
-        
-        # Extract key insights from the response
-        if state.get("final_response"):
-            response = state["final_response"]
-            if "$" in response and any(word in response.lower() for word in ["spent", "budget", "total"]):
-                # Extract monetary insights
-                import re
-                amounts = re.findall(r'\$[\d,]+(?:\.\d{2})?', response)
-                if amounts:
-                    insight = f"Recent discussion: {amounts[0]} mentioned"
-                    if insight not in context.key_insights:
-                        context.key_insights.append(insight)
-
-        # Keep only recent insights
-        context.key_insights = context.key_insights[-5:]
-
-        print(f"[DEBUG] 💾 Stored interaction: {context.last_user_query[:50]}... -> {len(state.get('final_response', ''))} chars")
-        print(f"[DEBUG] 📚 Total conversation history: {len(context.conversation_history)} interactions")
-
-    state["execution_path"].append("memory_updater")
-    print("✅ Memory updated with query-response history")
-
-except Exception as e:
-    print(f"❌ Memory update error: {e}")
-
-return state
-```
-
-# 4. ADD a method to retrieve conversation history
-
-def get_conversation_history(self, session_id: str, limit: int = 5) -> List[Dict[str, Any]]:
-“”“Get recent conversation history for a session”””
-
-```
-if session_id in self.contexts:
-    context = self.contexts[session_id]
-    return context.conversation_history[-limit:] if context.conversation_history else []
-else:
-    return []
-```
-
-# 5. ENHANCE the _context_manager_node to use conversation history for better follow-ups
-
-def _enhanced_followup_detection(self, user_query: str, context: ConversationContext) -> Optional[str]:
-“”“Use conversation history to enhance follow-up queries”””
-
-```
-if not context.conversation_history:
-    return None
-
-query_lower = user_query.lower()
-last_interaction = context.conversation_history[-1] if context.conversation_history else None
-
-# Check for follow-up patterns
-followup_patterns = ["show me", "tell me more", "what about", "how about", "and", "also"]
-
-if any(pattern in query_lower for pattern in followup_patterns) and last_interaction:
-    last_query = last_interaction.get("user_query", "").lower()
-    last_response = last_interaction.get("agent_response", "").lower()
-    
-    # If last query was about spending and this is a follow-up
-    if "spend" in last_query and any(word in query_lower for word in ["show", "tell", "more"]):
-        return f"Show me more details about my spending patterns (follow-up to: {last_interaction['user_query']})"
-    
-    # If last response mentioned categories and user wants to see them
-    if "categories" in last_response and any(word in query_lower for word in ["show", "categories"]):
-        return f"Show me my spending breakdown by categories (follow-up to previous conversation)"
-
-return None
-```
-
-# 6. UPDATE get_conversation_summary to include recent interactions
-
-def get_conversation_summary(self, session_id: str) -> Dict[str, Any]:
-“”“Get comprehensive conversation summary for a session”””
-
-```
-if session_id in self.contexts:
-    context = self.contexts[session_id]
-    
-    # Get recent query-response pairs
-    recent_interactions = []
-    for interaction in context.conversation_history[-3:]:  # Last 3 interactions
-        recent_interactions.append({
-            "query": interaction.get("user_query"),
-            "response_preview": interaction.get("agent_response", "")[:100] + "..." if interaction.get("agent_response") else "",
-            "agent": interaction.get("agent_used"),
-            "timestamp": interaction.get("timestamp")
-        })
-    
-    return {
-        "session_id": session_id,
-        "client_id": context.client_id,
-        "session_start": context.session_start.isoformat(),
-        "message_count": context.message_count,
-        "recent_topics": context.recent_topics,
-        "last_agent_used": context.last_agent_used,
-        "key_insights": context.key_insights,
-        "conversation_summary": context.conversation_summary,
-        "recent_interactions": recent_interactions,
-        "total_interactions": len(context.conversation_history)
+👤 **User**: How much did I spend last month?
+🧠 [DEBUG] Managing conversation context...
+[DEBUG] 🆕 New conversation started
+[DEBUG] 🏷️ Added topic: spending
+[DEBUG] Context: 1 messages, topics: ['spending'], last agent: None
+🎯 [DEBUG] Routing query to appropriate agent...
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+[DEBUG] ✅ Query relevance: True
+[DEBUG] ✅ Routed to: spending (The query directly asks about personal spending, which falls under the spending analysis and transactions category.)
+[DEBUG] ✅ Confidence: 1.00
+📊 [DEBUG] Executing spending agent query...
+[DEBUG] 📝 Processing original query: How much did I spend last month?
+🧠 [DEBUG] Classifying intent for: How much did I spend last month?
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+[DEBUG] Intent classified as: personal
+[DEBUG] Confidence: 0.95
+🔧 [DEBUG] Generating SQL queries...
+INFO:banking_agent.data_store.data_store:✅ Connected to SQLite DB at banking_data.db
+✅ DB has data: 5,110,524 client + 5,110,524 overall transactions
+⚠️ CSV not found: [WinError 2] The system cannot find the file specified: 'C:\\Users\\mohib.alikhan\\Desktop\\Banking-Agent\\banking_agent\\tools\\Banking_Data.csv', using existing DB
+✅ Using existing database (CSV loading skipped)
+✅ Budget tables ensured
+INFO:banking_agent.data_store.data_store:✅ DataStore ready for queries.
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+✅ Generated client SQL: client_analysis
+✅ Generated 1 SQL queries successfully
+[
+  "SELECT SUM(amount) AS total_spent_last_month\nFROM client_transactions\nWHERE client_id = 430\nAND date >= '2025-07-01' AND date <= '2025-07-31';"
+]
+⚡ [DEBUG] Executing SQL queries...
+ Executing query 1: client_analysis
+[DEBUG] Executing SQL: SELECT SUM(amount) AS total_spent_last_month
+FROM client_transactions
+WHERE client_id = 430
+AND date...
+[DEBUG] SQL executed: 1 rows in 0.006s
+ ✅ Query 1 success: 1 rows in 0.006s
+✅ Successfully executed 1 queries
+🔍 [DEBUG] Results for query 1:
+{
+  "query_type": "client_analysis",
+  "original_query": "How much did I spend last month?",
+  "sql_executed": "SELECT SUM(amount) AS total_spent_last_month\nFROM client_transactions\nWHERE client_id = 430\nAND date >= '2025-07-01' AND date <= '2025-07-31';",
+  "results": [
+    {
+      "total_spent_last_month": 7961.299978733063
     }
-else:
-    return {"error": "Session not found"}
-```
+  ],
+  "row_count": 1,
+  "execution_time": 0.006
+}
+ [DEBUG] Sending cleaned raw data with conversation context to LLM
+ [DEBUG] Context: This is the start of our conversation....
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+ [DEBUG] Generated contextual response length: 226 characters
+✅ Spending agent completed: True
+🔧 [DEBUG] Synthesizing final response...
+✅ Response synthesis complete
+💾 [DEBUG] Updating conversation memory...
+[DEBUG] 💾 Stored interaction: How much did I spend last month?... -> 316 chars
+[DEBUG] 📚 Total conversation history: 1 interactions
+✅ Memory updated with query-response history
+🤖 **Agent** (SPENDING): Last month, you spent a total of $7,961.30. If you'd like, I can help you break down this amount into different categories to see where most of your spending went. Let me know i
+f there's anything specific you're curious about!                                                                                                                                                         
+💡 *Based on this spending analysis, would you like help creating or reviewing a budget?*
+⚙️  *Success: True*
+✅ *Test passed!*
+
+🎯 **INTERACTIVE MODE**
+Now you can continue the conversation...
+----------------------------------------
+
+👤 You: Can you tell me more regarding the month
+🧠 [DEBUG] Managing conversation context...
+[DEBUG] 📝 Continuing conversation: message #2
+[DEBUG] 🔄 Follow-up context: spending agent, topics: ['spending']
+[DEBUG] Context: 2 messages, topics: ['spending'], last agent: spending
+🎯 [DEBUG] Routing query to appropriate agent...
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+[DEBUG] ✅ Query relevance: True
+[DEBUG] ✅ Routed to: spending (The query is a follow-up to a previous spending-related question and seeks more details about spending patterns, which falls under personal spending analysis.)     
+[DEBUG] ✅ Confidence: 0.95
+[DEBUG] 💡 Used enhanced query for routing
+📊 [DEBUG] Executing spending agent query...
+[DEBUG] 💡 Processing enhanced query: Show me more details about my spending patterns (follow-up to: How much did I spend last month?)
+🧠 [DEBUG] Classifying intent for: Show me more details about my spending patterns (follow-up to: How much did I spend last month?)
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+[DEBUG] Intent classified as: personal
+[DEBUG] Confidence: 0.9
+🔧 [DEBUG] Generating SQL queries...
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+✅ Generated client SQL: client_analysis
+✅ Generated 1 SQL queries successfully
+[
+  "SELECT\nmcc_category,\nSUM(amount) AS total_spent,\nCOUNT(*) AS transaction_count,\nAVG(amount) AS average_transaction_amount,\nSUM(CASE WHEN is_weekend THEN amount ELSE 0 END) AS weekend_spending,\n
+SUM(CASE WHEN is_night_txn THEN amount ELSE 0 END) AS night_spending\nFROM\nclient_transactions\nWHERE\nclient_id = 430\nAND date >= '2025-07-01'\nAND date <= '2025-07-31'\nGROUP BY\nmcc_category;"     ]
+⚡ [DEBUG] Executing SQL queries...
+ Executing query 1: client_analysis
+[DEBUG] Executing SQL: SELECT
+mcc_category,
+SUM(amount) AS total_spent,
+COUNT(*) AS transaction_count,
+AVG(amount) AS avera...
+[DEBUG] SQL executed: 13 rows in 0.001s
+ ✅ Query 1 success: 13 rows in 0.001s
+✅ Successfully executed 1 queries
+🔍 [DEBUG] Results for query 1:
+{
+  "query_type": "client_analysis",
+  "original_query": "Show me more details about my spending patterns (follow-up to: How much did I spend last month?)",
+  "sql_executed": "SELECT\nmcc_category,\nSUM(amount) AS total_spent,\nCOUNT(*) AS transaction_count,\nAVG(amount) AS average_transaction_amount,\nSUM(CASE WHEN is_weekend THEN amount ELSE 0 END) AS wee
+kend_spending,\nSUM(CASE WHEN is_night_txn THEN amount ELSE 0 END) AS night_spending\nFROM\nclient_transactions\nWHERE\nclient_id = 430\nAND date >= '2025-07-01'\nAND date <= '2025-07-31'\nGROUP BY\nmcc_category;",                                                                                                                                                                                                "results": [
+    {
+      "mcc_category": "Bars & Alcohol",
+      "total_spent": 116.09999942779541,
+      "transaction_count": 4,
+      "average_transaction_amount": 29.024999856948853,
+      "weekend_spending": 33.31999969482422,
+      "night_spending": 12.800000190734863
+    },
+    {
+      "mcc_category": "Clothing & Apparel",
+      "total_spent": 114.19000244140625,
+      "transaction_count": 1,
+      "average_transaction_amount": 114.19000244140625,
+      "weekend_spending": 0,
+      "night_spending": 114.19000244140625
+    },
+    {
+      "mcc_category": "Electronics & Digital",
+      "total_spent": 117.51000213623047,
+      "transaction_count": 1,
+      "average_transaction_amount": 117.51000213623047,
+      "weekend_spending": 0,
+      "night_spending": 117.51000213623047
+    },
+    {
+      "mcc_category": "Entertainment",
+      "total_spent": 11.34000015258789,
+      "transaction_count": 1,
+      "average_transaction_amount": 11.34000015258789,
+      "weekend_spending": 0,
+      "night_spending": 11.34000015258789
+    },
+    {
+      "mcc_category": "Financial Services",
+      "total_spent": 3660.0,
+      "transaction_count": 28,
+      "average_transaction_amount": 130.71428571428572,
+      "weekend_spending": 940.0,
+      "night_spending": 0
+    },
+    {
+      "mcc_category": "Groceries",
+      "total_spent": 1265.2099962234497,
+      "transaction_count": 48,
+      "average_transaction_amount": 26.358541587988537,
+      "weekend_spending": 388.17000007629395,
+      "night_spending": 912.6899933815002
+    },
+    {
+      "mcc_category": "Home & Furnishings",
+      "total_spent": 117.55999755859375,
+      "transaction_count": 1,
+      "average_transaction_amount": 117.55999755859375,
+      "weekend_spending": 117.55999755859375,
+      "night_spending": 117.55999755859375
+    },
+    {
+      "mcc_category": "Pharmacy",
+      "total_spent": 382.87000703811646,
+      "transaction_count": 11,
+      "average_transaction_amount": 34.806364276192404,
+      "weekend_spending": 75.33000230789185,
+      "night_spending": 271.52000665664673
+    },
+    {
+      "mcc_category": "Restaurants",
+      "total_spent": 337.81000089645386,
+      "transaction_count": 25,
+      "average_transaction_amount": 13.512400035858155,
+      "weekend_spending": 112.30000066757202,
+      "night_spending": 96.06999969482422
+    },
+    {
+      "mcc_category": "Telecom",
+      "total_spent": 394.8199920654297,
+      "transaction_count": 2,
+      "average_transaction_amount": 197.40999603271484,
+      "weekend_spending": 0,
+      "night_spending": 394.8199920654297
+    },
+    {
+      "mcc_category": "Transportation",
+      "total_spent": 558.4299960136414,
+      "transaction_count": 22,
+      "average_transaction_amount": 25.383181636983696,
+      "weekend_spending": 314.55999994277954,
+      "night_spending": 294.60999965667725
+    },
+    {
+      "mcc_category": "Utilities",
+      "total_spent": 21.290000915527344,
+      "transaction_count": 1,
+      "average_transaction_amount": 21.290000915527344,
+      "weekend_spending": 0,
+      "night_spending": 0
+    },
+    {
+      "mcc_category": "Wholesale & Retail",
+      "total_spent": 864.1699838638306,
+      "transaction_count": 12,
+      "average_transaction_amount": 72.01416532198589,
+      "weekend_spending": 225.60000324249268,
+      "night_spending": 653.4099893569946
+    }
+  ],
+  "row_count": 13,
+  "execution_time": 0.001
+}
+ [DEBUG] Sending cleaned raw data with conversation context to LLM
+ [DEBUG] Context: This is the start of our conversation....
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+ [DEBUG] Generated contextual response length: 1447 characters
+✅ Spending agent completed: True
+🔧 [DEBUG] Synthesizing final response...
+✅ Response synthesis complete
+💾 [DEBUG] Updating conversation memory...
+[DEBUG] 💾 Stored interaction: Can you tell me more regarding the month... -> 1537 chars
+[DEBUG] 📚 Total conversation history: 2 interactions
+✅ Memory updated with query-response history
+
+📊 **Spending Agent**: Certainly! Let's take a closer look at your spending patterns from last month.
+
+You spent a total of $116.10 on Bars & Alcohol, with most of this spending happening on weekends. Your average transaction in this category was about $29.02.
+
+In Clothing & Apparel, you made a single purchase of $114.19, which occurred at night.
+
+For Electronics & Digital, you also had one transaction, spending $117.51, again at night.
+
+Your Entertainment spending was $11.34, all of which was at night.
+
+Financial Services was a significant category, with $3,660 spent across 28 transactions. A substantial portion, $940, was spent over the weekend.
+
+Groceries were another major category, with $1,265.21 spent over 48 transactions. You tended to spend more on weekends and at night.
+
+In Home & Furnishings, you spent $117.56, with this purchase happening on a weekend night.
+
+Pharmacy expenses totaled $382.87, with a notable amount spent at night.
+
+You spent $337.81 at Restaurants, with a good portion of this on weekends and nights.
+
+Telecom expenses were $394.82, all of which occurred at night.
+
+Transportation costs were $558.43, with significant spending on weekends and nights.
+
+Utilities were a smaller category, with a single transaction of $21.29.
+
+Lastly, in Wholesale & Retail, you spent $864.17, with a large portion of this spending happening at night.
+
+If you have any specific questions or need advice on managing your spending, feel free to ask!
+
+💡 *Based on this spending analysis, would you like help creating or reviewing a budget?*
+🛤️  *Execution Path: context_manager → query_router → spending_agent → response_synthesizer → memory_updater*
+🎯 *Routing: 2 messages in conversation*
+
+👤 You: Which montha are you refeerring to
+🧠 [DEBUG] Managing conversation context...
+[DEBUG] 📝 Continuing conversation: message #3
+[DEBUG] Context: 3 messages, topics: ['spending'], last agent: spending
+🎯 [DEBUG] Routing query to appropriate agent...
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+[DEBUG] ✅ Query relevance: True
+[DEBUG] ✅ Routed to: spending (The query seems to be seeking clarification on a previous discussion about spending, which is relevant to personal finance.)
+[DEBUG] ✅ Confidence: 0.80
+📊 [DEBUG] Executing spending agent query...
+[DEBUG] 📝 Processing original query: Which montha are you refeerring to
+🧠 [DEBUG] Classifying intent for: Which montha are you refeerring to
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+[DEBUG] Intent classified as: personal
+[DEBUG] Confidence: 0.2
+🔧 [DEBUG] Handling error: None
+❌ Graph execution error: argument of type 'NoneType' is not iterable
+✅ Spending agent completed: False
+🔧 [DEBUG] Synthesizing final response...
+✅ Response synthesis complete
+💾 [DEBUG] Updating conversation memory...
+[DEBUG] 💾 Stored interaction: Which montha are you refeerring to... -> 188 chars
+[DEBUG] 📚 Total conversation history: 3 interactions
+✅ Memory updated with query-response history
+
+📊 **Spending Agent**: I encountered a system error while processing your request. Please try again with a simpler query.
+
+💡 *Based on this spending analysis, would you like help creating or reviewing a budget?*
+🛤️  *Execution Path: context_manager → query_router → spending_agent → response_synthesizer → memory_updater*
+🎯 *Routing: 3 messages in conversation*
+
+👤 You:
+👋 Chat interrupted. Goodbye!
+INFO:data_store.data_store:🔒 SQLite connection closed
+INFO:data_store.data_store:🔒 SQLite connection closed

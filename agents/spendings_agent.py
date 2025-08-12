@@ -34,13 +34,13 @@ sys.path.insert(
 # generate_sql_for_benchmark_analysis,
 # execute_generated_sql
 # )
-from data_store.data_store import (
-    DataStore,
-    execute_generated_sql,
-    generate_sql_for_benchmark_analysis,
-    generate_sql_for_client_analysis,
-)
 
+from data_store.data_store import DataStore
+from banking_agent.tools.tools import ( 
+    generate_sql_for_client_analysis,
+    generate_sql_for_benchmark_analysis,
+    execute_generated_sql
+)
 load_dotenv()
 
 
@@ -342,15 +342,14 @@ Analyze this query and provide structured classification:""",
                         }
                     )
 
-                    if "error" not in client_sql_result:
+                    if client_sql_result and "error" not in client_sql_result:
                         sql_queries.append(client_sql_result)
                         print(
                             f"✅ Generated client SQL: {client_sql_result.get('query_type', 'unknown')}"
                         )
                     else:
-                        print(
-                            f"⚠️ Client SQL generation failed: {client_sql_result['error']}"
-                        )
+                        error_msg = client_sql_result.get('error', 'Unknown error') if client_sql_result else 'No result returned'
+                        print(f"⚠️ Client SQL generation failed: {error_msg}")
 
                 except Exception as e:
                     print(f"⚠️ Client SQL generation error: {e}")
@@ -369,15 +368,14 @@ Analyze this query and provide structured classification:""",
                         }
                     )
 
-                    if "error" not in benchmark_sql_result:
+                    if benchmark_sql_result and "error" not in benchmark_sql_result:
                         sql_queries.append(benchmark_sql_result)
                         print(
                             f"✅ Generated benchmark SQL: {benchmark_sql_result.get('query_type', 'unknown')}"
                         )
                     else:
-                        print(
-                            f"⚠️ Benchmark SQL generation failed: {benchmark_sql_result['error']}"
-                        )
+                        error_msg = benchmark_sql_result.get('error', 'Unknown error') if benchmark_sql_result else 'No result returned'
+                        print(f"⚠️ Benchmark SQL generation failed: {error_msg}")
 
                 except Exception as e:
                     print(f"⚠️ Benchmark SQL generation error: {e}")
@@ -389,7 +387,12 @@ Analyze this query and provide structured classification:""",
             state["execution_path"].append("sql_generator")
 
             print(f"✅ Generated {len(sql_queries)} SQL queries successfully")
-            print(json.dumps([q["sql_query"] for q in sql_queries], indent=2))
+            # Safe iteration over sql_queries
+            sql_list = []
+            for q in sql_queries:
+                if q and "sql_query" in q:
+                    sql_list.append(q["sql_query"])
+            print(json.dumps(sql_list, indent=2))
 
 
         except Exception as e:
@@ -406,9 +409,12 @@ Analyze this query and provide structured classification:""",
 
             raw_data = []
             sql_queries = state.get("sql_queries", [])
+            
+            if not sql_queries:
+                raise ValueError("No SQL queries to execute")
 
             for i, query_info in enumerate(sql_queries):
-                if "sql_query" not in query_info:
+                if not query_info or "sql_query" not in query_info:
                     print(f"⚠️ Query {i+1}: Missing sql_query field")
                     continue
 
@@ -424,8 +430,9 @@ Analyze this query and provide structured classification:""",
                         }
                     )
 
-                    if "error" in execution_result:
-                        print(f" ❌ Query {i+1} failed: {execution_result['error']}")
+                    if not execution_result or "error" in execution_result:
+                        error_msg = execution_result.get('error', 'No result returned') if execution_result else 'No result returned'
+                        print(f" ❌ Query {i+1} failed: {error_msg}")
                         continue
 
                     # Store successful result
@@ -458,8 +465,9 @@ Analyze this query and provide structured classification:""",
 
             print(f"✅ Successfully executed {len(raw_data)} queries")
 
-            print(f"🔍 [DEBUG] Results for query {i+1}:")
-            print(json.dumps(raw_data[-1], indent=2, default=str))
+            if raw_data:
+                print(f"🔍 [DEBUG] Results for query {len(raw_data)}:")
+                print(json.dumps(raw_data[-1], indent=2, default=str))
 
         except Exception as e:
             state["error"] = f"SQL execution failed: {e}"
@@ -853,10 +861,10 @@ Analyze this query and provide structured classification:""",
             context_parts.append(f"Topics we've discussed: {', '.join(conversation_context.recent_topics)}")
         
         # Add recent conversations (last 2 for immediate context)
-        if conversation_context.recent_conversations:
+        if hasattr(conversation_context, 'conversation_history') and conversation_context.conversation_history:
             context_parts.append("\nRecent conversation:")
             
-            recent_convs = conversation_context.recent_conversations[-2:]  # Last 2 conversations
+            recent_convs = conversation_context.conversation_history[-2:]  # Last 2 conversations
             
             for i, conv in enumerate(recent_convs, 1):
                 if conv.get("user_query") and conv.get("agent_response"):
@@ -869,8 +877,8 @@ Analyze this query and provide structured classification:""",
                     if i < len(recent_convs):  
                         context_parts.append("  ---")
         
-    
-        if conversation_context.older_summary:
+        # Check for older_summary attribute
+        if hasattr(conversation_context, 'older_summary') and conversation_context.older_summary:
             context_parts.append(f"\nEarlier in our conversation: {conversation_context.older_summary}")
         if conversation_context.key_insights:
             context_parts.append(f"\nKey insights from our discussion: {', '.join(conversation_context.key_insights)}")

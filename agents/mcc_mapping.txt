@@ -1,0 +1,98 @@
+#Defining my mapping
+mcc_mapping = {
+    # Financial Services
+    4829: "Financial Services",  # Money Transfer
+
+    # Utilities
+    4900: "Utilities",  # Utilities - Electric, Gas, Water, Sanitary
+
+    # Insurance
+    6300: "Insurance",  # Insurance Sales, Underwriting
+
+    # Groceries
+    5411: "Groceries",  # Grocery Stores, Supermarkets
+    5499: "Groceries",  # Miscellaneous Food Stores
+    
+
+    # Restaurants
+    5812: "Restaurants",  # Eating Places and Restaurants
+    5814: "Restaurants",  # Fast Food Restaurants
+
+    # Bars & Alcohol
+    5813: "Bars & Alcohol",  # Drinking Places (Alcoholic Beverages)
+    5921: "Bars & Alcohol",  # Package Stores, Beer, Wine, Liquor
+
+    # Wholesale & Retail
+    5300: "Wholesale & Retail",  # Wholesale Clubs
+    5310: "Wholesale & Retail",  # Discount Stores
+    5311: "Wholesale & Retail",  # Department Stores
+
+    # Clothing & Apparel
+    5651: "Clothing & Apparel",  # Family Clothing Stores
+    5661: "Clothing & Apparel",  # Shoe Stores
+    5621: "Clothing & Apparel",  # Women's Ready-To-Wear Stores
+
+    # Pharmacy & Healthcare
+    5912: "Pharmacy",  # Drug Stores and Pharmacies
+    8011: "Healthcare",  # Doctors, Physicians
+    8021: "Healthcare",  # Dentists and Orthodontists
+    8041: "Healthcare",  # Chiropractors
+    8043: "Healthcare",  # Optometrists, Optical Goods and Eyeglasses
+    8049: "Healthcare",  # Podiatrists
+    8099: "Healthcare",  # Medical Services
+    8062: "Healthcare",  # Hospitals
+
+    # Transportation
+    5541: "Transportation",  # Service Stations
+    4784: "Transportation",  # Tolls and Bridge Fees
+    4111: "Transportation",  # Local and Suburban Commuter Transportation
+    4112: "Transportation",  # Passenger Railways
+    4121: "Transportation",  # Taxicabs and Limousines
+    4131: "Transportation",  # Bus Lines
+    4214: "Transportation",  # Motor Freight Carriers and Trucking
+    4511: "Transportation",  # Airlines
+    4411: "Transportation",  # Cruise Lines
+
+    # Lodging & Travel
+    7011: "Lodging & Travel",  # Lodging - Hotels, Motels, Resorts
+    4722: "Lodging & Travel",  # Travel Agencies
+
+    # Telecom
+    4814: "Telecom",  # Telecommunication Services
+    4899: "Telecom",  # Cable, Satellite, and Other Pay Television Services
+
+    # Home & Furnishings
+    5712: "Home & Furnishings",  # Furniture, Home Furnishings, and Equipment Stores
+    5719: "Home & Furnishings",  # Miscellaneous Home Furnishing Stores
+    5211: "Home & Furnishings",  # Lumber and Building Materials
+    5251: "Home & Furnishings",  # Hardware Stores
+    5722: "Home & Furnishings",  # Household Appliance Stores
+
+    # Auto Services
+    7538: "Auto Services",  # Automotive Service Shops
+    7531: "Auto Services",  # Automotive Body Repair Shops
+    7542: "Auto Services",  # Car Washes
+    7549: "Auto Services",  # Towing Services
+    5533: "Auto Services",  # Automotive Parts and Accessories Stores
+
+    # Entertainment
+    7995: "Entertainment",  # Betting (including Lottery Tickets, Casinos)
+    7996: "Entertainment",  # Amusement Parks, Carnivals, Circuses
+    7832: "Entertainment",  # Motion Picture Theaters
+    7922: "Entertainment",  # Theatrical Producers
+    7801: "Entertainment",  # Athletic Fields, Commercial Sports
+    7802: "Entertainment",  # Recreational Sports, Clubs
+
+    # Electronics & Digital
+    5045: "Electronics & Digital",  # Computers, Computer Peripheral Equipment
+    5732: "Electronics & Digital",  # Electronics Stores
+    5733: "Electronics & Digital",  # Music Stores - Musical Instruments
+    5815: "Electronics & Digital",  # Digital Goods - Media, Books, Apps
+    5816: "Electronics & Digital",  # Digital Goods - Games
+
+    # Professional Services
+    8111: "Professional Services",  # Legal Services and Attorneys
+    8931: "Professional Services",  # Accounting, Auditing, and Bookkeeping Services
+    7276: "Professional Services",  # Tax Preparation Services
+    7393: "Professional Services",  # Detective Agencies, Security Services
+}
