@@ -28,13 +28,20 @@ sys.path.insert(
 
 # Import the updated DataStore and tools
 from data_store.data_store import DataStore
-from banking_agent.tools.tools import (
+# from banking_agent.tools.tools import (
+#     generate_sql_for_client_analysis,
+#     generate_sql_for_budget_analysis,
+#     execute_generated_sql,
+#     create_or_update_budget,
+#     update_budget_tracking_for_month)
+
+
+from tools.tools import (
     generate_sql_for_client_analysis,
     generate_sql_for_budget_analysis,
     execute_generated_sql,
     create_or_update_budget,
     update_budget_tracking_for_month)
-
 load_dotenv()
 
 
@@ -359,7 +366,6 @@ Analyze this budget query and provide structured classification:""",
     def _extract_budget_creation_params(self, user_query: str) -> Optional[Dict[str, Any]]: #(to be changed)
         """Extract budget creation parameters from user query"""
         
-        # This is a simple extraction - in production, you'd use more sophisticated NLP
         query_lower = user_query.lower()
         
         # Look for budget amounts, it is searching for Dollar sign $

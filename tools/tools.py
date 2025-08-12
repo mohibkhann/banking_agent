@@ -7,7 +7,10 @@ from langchain_openai import ChatOpenAI
 import sys
 from pathlib import Path
 # Import the DataStore 
-from banking_agent.data_store.data_store import DataStore
+# from banking_agent.data_store.data_store import DataStore
+
+from data_store.data_store import DataStore
+
 # for current time calculation 
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
