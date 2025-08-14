@@ -10,7 +10,7 @@ mcc_mapping = {
     6300: "Insurance",  # Insurance Sales, Underwriting
 
     # Groceries
-    5411: "Groceries",  # Grocery Stores, Supermarkets
+    5411: "Groceries    ",  # Grocery Stores, Supermarkets
     5499: "Groceries",  # Miscellaneous Food Stores
     
 
