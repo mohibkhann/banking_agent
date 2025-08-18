@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
@@ -129,7 +129,11 @@ class PersonalFinanceRouter:
         )
 
         # Initialize LLM for routing
-        self.llm = ChatOpenAI(model=model_name, temperature=0)
+        self.llm = AzureChatOpenAI(
+                        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+                        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+                        temperature=0,
+                    )
         
         # Set up routing parser
         self.routing_parser = PydanticOutputParser(pydantic_object=AgentRouting)
@@ -179,7 +183,7 @@ class PersonalFinanceRouter:
         workflow.add_edge("memory_updater", END)
         workflow.add_edge("error_handler", END)
 
-        return workflow.compile(checkpointer=self.memory)
+        return workflow.compile(checkpointer=None)
 
 
     def _context_manager_node(self, state: MultiAgentState) -> MultiAgentState:
@@ -878,8 +882,7 @@ class PersonalFinanceRouter:
         )
 
         try:
-            config = {"configurable": {"thread_id": session_id}} if self.memory else {}
-            final_state = self.graph.invoke(initial_state, config=config)
+            final_state = self.graph.invoke(initial_state)
 
             # Handle case where routing_decision might be None
             agent_used = "unknown"
@@ -952,12 +955,11 @@ class PersonalFinanceRouter:
 
 
 def interactive_chat_demo():
-    """Interactive chat demo as user 430"""
+    """Simple interactive chat demo for testing queries"""
     
-    print("=" * 60)
-    print("💬 Chatting as User ID: 430")
-    print("🔧 Type 'quit' to exit")
-    print("=" * 60)
+    print("💬 Personal Finance Chat Demo - User ID: 430")
+    print("Type 'quit' to exit")
+    print("-" * 50)
 
     # Initialize router
     client_csv = "/Users/mohibalikhan/Desktop/banking-agent/banking_agent/Banking_Data.csv"
@@ -966,145 +968,44 @@ def interactive_chat_demo():
     try:
         router = PersonalFinanceRouter(
             client_csv_path=client_csv,
-            overall_csv_path=overall_csv,
-            enable_memory=False  
-        )
-
-        client_id = 430
-        session_id = f"demo_session_{datetime.now().strftime('%Y%m%d_%H%M')}"
+            overall_csv_path=overall_csv        )
         
-        print(f"\n🎬 **SIMPLE TEST MODE**")
-        print(f"Session ID: {session_id}")
-        print("-" * 40)
-
-        # Simple test queries first
-        test_queries = [
-            "How much did I spend last month?"
-        ]
-
-        for i, query in enumerate(test_queries, 1):
-            print(f"\n👤 **User**: {query}")
+        client_id = 430
+        session_id = f"demo_{datetime.now().strftime('%Y%m%d_%H%M')}"
+        
+        # Main chat loop
+        while True:
+            user_input = input("\n👤 You: ").strip()
             
+            if user_input.lower() in ['quit', 'exit']:
+                print("👋 Goodbye!")
+                break
+                
+            if not user_input:
+                continue
+
+            # Process query
             result = router.chat(
                 client_id=client_id,
-                user_query=query,
+                user_query=user_input,
                 session_id=session_id
             )
 
-            print(f"🤖 **Agent** ({result['agent_used'].upper()}): {result['response']}")
-            print(f"⚙️  *Success: {result['success']}*")
+            # Display response
+            agent_used = result.get('agent_used', 'system').upper()
+            response = result.get('response', 'No response')
+            success = result.get('success', False)
+            
+            print(f"\n🤖 {agent_used}: {response}")
+            print(f"✅ Success: {success}")
             
             if result.get('error'):
-                print(f"❌ *Error: {result['error']}*")
-            else:
-                print("✅ *Test passed!*")
-
-        print("Now you can continue the conversation...")
-        print("-" * 40)
-
-        # Interactive mode
-        while True:
-            try:
-                user_input = input(f"\n👤 You: ").strip()
-                
-                if user_input.lower() in ['quit', 'exit', 'bye']:
-                    print("👋 Thanks for using Personal Finance Assistant!")
-                    break
-                elif user_input.lower() == 'test':
-                    # Quick test of individual agents
-                    print("\n🧪 **Testing Individual Agents**")
-                    
-                    # Test spending agent directly
-                    print("📊 Testing Spending Agent...")
-                    try:
-                        spending_result = router.spending_agent.process_query(
-                            client_id=client_id,
-                            user_query="How much did I spend last month?"
-                        )
-                        print(f"✅ Spending Agent: {spending_result['success']}")
-                        if spending_result['success']:
-                            print(f"📝 Response: {spending_result['response'][:100]}...")
-                        else:
-                            print(f"❌ Error: {spending_result.get('error', 'Unknown error')}")
-                    except Exception as e:
-                        print(f"❌ Spending Agent failed: {e}")
-                    
-                    # Test budget agent directly  
-                    print("\n💰 Testing Budget Agent...")
-                    try:
-                        budget_result = router.budget_agent.process_query(
-                            client_id=client_id,
-                            user_query="Create a $800 budget for groceries"
-                        )
-                        print(f"✅ Budget Agent: {budget_result['success']}")
-                        if budget_result['success']:
-                            print(f"📝 Response: {budget_result['response'][:100]}...")
-                        else:
-                            print(f"❌ Error: {budget_result.get('error', 'Unknown error')}")
-                    except Exception as e:
-                        print(f"❌ Budget Agent failed: {e}")
-                        
-                    continue
-                elif not user_input:
-                    continue
-
-                result = router.chat(
-                    client_id=client_id,
-                    user_query=user_input,
-                    session_id=session_id
-                )
-
-                # Enhanced response display with full routing information
-                agent_emoji = {
-                    'spending': '📊',
-                    'budget': '💰',
-                    'error': '❌',
-                    'unknown': '🤖'
-                }.get(result['agent_used'], '🤖')
-                
-                agent_name = result['agent_used'].title() + " Agent" if result['agent_used'] not in ['error', 'unknown'] else 'System'
-                
-                print(f"\n{agent_emoji} **{agent_name}**: {result['response']}")
-                
-                # Show detailed execution path
-                if result.get('execution_path'):
-                    path_display = ' → '.join(result['execution_path'])
-                    print(f"🛤️  *Execution Path: {path_display}*")
-                
-                # Show routing decision details
-                print(f"🎯 *Routing: {result.get('message_count', 0)} messages in conversation*")
-                
-                # Handle errors gracefully
-                if result.get('error'):
-                    print(f"\n⚠️ *Technical note: {result['error']}*")
-                    print("💡 Try rephrasing your question or ask for help with 'help'")
-
-            except KeyboardInterrupt:
-                print("\n👋 Chat interrupted. Goodbye!")
-                break
-            except Exception as e:
-                print(f"❌ Error: {e}")
+                print(f"❌ Error: {result['error']}")
 
     except Exception as e:
-        print(f"❌ Failed to initialize router: {e}")
-        print("💡 Trying individual agent tests...")
-        
-        # Try testing agents individually
-        try:
-            from agents.spendings_agent import SpendingAgent
-            print("🧪 Testing Spending Agent directly...")
-            spending_agent = SpendingAgent(
-                client_csv_path=client_csv,
-                overall_csv_path=overall_csv,
-                memory=False
-            )
-            result = spending_agent.process_query(430, "How much did I spend last month?")
-            print(f"✅ Spending Agent works: {result['success']}")
-            print(f"📝 Response: {result['response'][:100]}...")
-            
-        except Exception as e2:
-            print(f"❌ Spending Agent also failed: {e2}")
-
+        print(f"❌ Failed to initialize: {e}")
 
 if __name__ == "__main__":
     interactive_chat_demo()
+
+

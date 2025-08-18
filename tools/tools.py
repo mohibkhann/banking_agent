@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
 import sys
 from pathlib import Path
 # Import the DataStore 
@@ -84,7 +84,7 @@ def generate_sql_for_client_analysis(
     client_id: int
 ) -> Dict[str, Any]:
     """
-    Generate optimized SQL for client_transactions with current date context.
+    Generate optimized SQL for client_transactions with current date context and enhanced MCC analysis.
     """
     ds = _ensure_datastore()
     schema = ds.get_schema_info()["client_transactions"]
@@ -92,7 +92,7 @@ def generate_sql_for_client_analysis(
     # Get current date context
     date_context = get_current_date_context()
 
-    # Build schema description
+    # Build enhanced schema description with MCC intelligence
     schema_desc_lines = [
         "CLIENT_TRANSACTIONS TABLE:",
         f"Description: {schema['description']}",
@@ -103,7 +103,9 @@ def generate_sql_for_client_analysis(
         "client_id": "INTEGER - Unique client identifier (ALWAYS required in WHERE clause)",
         "date": "TEXT (YYYY-MM-DD) - Transaction date",
         "amount": "REAL - Transaction amount in dollars",
-        "mcc_category": "TEXT - Category (restaurants, grocery, etc.)",
+        "mcc_category": "TEXT - High-level spending category (Restaurants, Groceries, Transportation, etc.)",
+        "mcc_original": "TEXT - Detailed merchant category (e.g., 'Eating Places and Restaurants', 'Fast Food Restaurants')",
+        "mcc_number": "INTEGER - Specific MCC code (e.g., 5812 = Restaurants, 5814 = Fast Food)",
         "merchant_city": "TEXT - City where transaction occurred",
         "is_weekend": "BOOLEAN - Weekend flag",
         "is_night_txn": "BOOLEAN - Night transaction flag",
@@ -117,12 +119,68 @@ def generate_sql_for_client_analysis(
 
     prompt = ChatPromptTemplate.from_messages([
                 ("system", f"""
-            You are an expert SQL generator for banking transaction analysis.
-            Generate efficient SQLite queries against client_transactions. Try making a SQL query which can provide rich, comparative data without deciding the answer inside SQL.
+            You are an expert SQL generator for banking transaction analysis with intelligent MCC (Merchant Category Code) analysis.
+            Generate efficient SQLite queries against client_transactions with smart MCC granularity detection.
 
             {date_context}
 
             {schema_desc}
+
+            MCC ANALYSIS INTELLIGENCE:
+            
+            **MCC GRANULARITY LEVELS:**
+            1. **HIGH-LEVEL** (mcc_category): Use for general spending analysis
+               - Examples: "Restaurants", "Groceries", "Transportation"
+               - Query: GROUP BY mcc_category
+            
+            2. **DETAILED** (mcc_category + mcc_original): Use for specific breakdowns
+               - Examples: "Fast Food Restaurants" vs "Eating Places and Restaurants"
+               - Query: GROUP BY mcc_category, mcc_original
+            
+            3. **GRANULAR** (include mcc_number): Use for exact MCC code analysis
+               - Examples: MCC 5812 vs MCC 5814
+               - Query: SELECT mcc_number, mcc_original, mcc_category
+
+            **WHEN TO USE DETAILED MCC ANALYSIS:**
+            - User asks: "breakdown", "detailed", "specific", "what exactly", "what types"
+            - User asks: "what restaurants exactly", "break down my grocery spending"
+            - Follow-up questions after showing category totals
+            - User mentions: "merchant types", "specific categories", "drill down"
+
+            **WHEN TO USE HIGH-LEVEL MCC:**
+            - User asks: "total by category", "spending categories", "overall breakdown"
+            - First-time category analysis
+            - General spending summaries
+
+            **SQL EXAMPLES:**
+
+            High-level category query:
+            SELECT mcc_category, SUM(amount) as total_spent, COUNT(*) as transaction_count
+            FROM client_transactions 
+            WHERE client_id = {client_id}
+            GROUP BY mcc_category
+            ORDER BY total_spent DESC;
+
+            Detailed breakdown query:
+            SELECT mcc_category, mcc_original, SUM(amount) as total_spent, COUNT(*) as transaction_count
+            FROM client_transactions 
+            WHERE client_id = {client_id}
+            GROUP BY mcc_category, mcc_original
+            ORDER BY mcc_category, total_spent DESC;
+
+            Granular MCC analysis:
+            SELECT mcc_number, mcc_original, mcc_category, SUM(amount) as total_spent
+            FROM client_transactions 
+            WHERE client_id = {client_id}
+            GROUP BY mcc_number, mcc_original, mcc_category
+            ORDER BY total_spent DESC;
+
+            Restaurant-specific detailed breakdown:
+            SELECT mcc_original, SUM(amount) as total_spent, COUNT(*) as transaction_count
+            FROM client_transactions 
+            WHERE client_id = {client_id} AND mcc_category = 'Restaurants'
+            GROUP BY mcc_original
+            ORDER BY total_spent DESC;
 
             CRITICAL REQUIREMENTS:
             - ALWAYS include WHERE client_id = {client_id}
@@ -130,55 +188,34 @@ def generate_sql_for_client_analysis(
             - If the user explicitly mentions specific dates/years (e.g., "2021 or 2023"), you MAY use those exact periods with range filters (YYYY-01-01 to YYYY-12-31). Otherwise, NEVER hardcode years; derive from the provided date context
             - Use indexed columns: client_id, date, mcc_category, amount
             - Date format YYYY-MM-DD
-            - Use Aliases in your query
+            - Use meaningful aliases in your query
             - Aggregates: SUM, AVG, COUNT
-            - NOT SELF-DECIDING: never pick a “winner” or collapse to a single answer in SQL.
+            - NOT SELF-DECIDING: never pick a "winner" or collapse to a single answer in SQL
             - DO NOT use ORDER BY ... LIMIT 1 to select the max/min period
-            - DO NOT use CASE expressions that compare aggregates to choose a label (e.g., return '2021' vs '2023')
+            - DO NOT use CASE expressions that compare aggregates to choose a label
             - DO NOT use subqueries that filter to only the max/min aggregate
-            - INSTEAD return one row per candidate period/category (e.g., year, month, mcc_category) with the relevant aggregates so the application can decide
-            - Prefer sargable range filters over strftime when possible to leverage indexes:
-            - e.g., date >= 'YYYY-01-01' AND date < 'YYYY+1-01-01'
-            - Try giving a query which provides all the needed comparative data and remains not self-deciding
+            - INSTEAD return one row per candidate period/category with relevant aggregates
+            - Prefer sargable range filters over strftime when possible to leverage indexes
             - RETURN ONLY THE SQL QUERY - no explanations or markdown
 
-            EXAMPLES:
-            - "last month spending" → WHERE date >= 'YYYY-MM-01' AND date <= 'YYYY-MM-DD' (use last-month dates from context); GROUP BY day or category as needed
-            - "this year" → WHERE date >= 'YYYY-01-01' AND date <= 'YYYY-MM-DD' (current year to date)
-
-            BAD (self-deciding):
-            SELECT CASE
-            WHEN SUM(CASE WHEN date >= '2021-01-01' AND date <= '2021-12-31' THEN amount ELSE 0 END) >
-                SUM(CASE WHEN date >= '2023-01-01' AND date <= '2023-12-31' THEN amount ELSE 0 END)
-            THEN '2021' ELSE '2023' END AS year_with_most_spending
-            FROM client_transactions
-            WHERE client_id = {client_id};
-
-            BAD (also self-deciding):
-            SELECT strftime('%Y',date) AS year,SUM(amount) AS total_spent
-            FROM client_transactions
-            WHERE client_id = {client_id} AND (date BETWEEN '2021-01-01' AND '2023-12-31')
-            GROUP BY year
-            ORDER BY total_spent DESC
-            LIMIT 1;
-
-            GOOD (comparative, not self-deciding; user named the years):
-            SELECT strftime('%Y',date) AS year,SUM(amount) AS total_spent
-            FROM client_transactions
-            WHERE client_id = {client_id}
-            AND (
-                (date >= '2021-01-01' AND date < '2022-01-01') OR
-                (date >= '2023-01-01' AND date < '2024-01-01')
-            )
-            GROUP BY year
-            ORDER BY year;
+            **MCC QUERY DECISION LOGIC:**
+            1. Analyze user query for granularity keywords
+            2. If detailed analysis requested → include mcc_original
+            3. If granular analysis requested → include mcc_number
+            4. If general category analysis → use mcc_category only
+            5. Always provide rich comparative data without self-deciding
 
             Generate ONLY the SQL query for:
             """),
                 ("human", "{user_query}")
             ])
+
     try:
-        llm = ChatOpenAI(model="gpt-4o", temperature=0)
+        llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+            temperature=0,
+        )        
         resp = llm.invoke(prompt.format_messages(user_query=user_query))
         
         if not resp or not resp.content:
@@ -215,12 +252,20 @@ def generate_sql_for_client_analysis(
         if "2023" in sql:
             print(f"⚠️ WARNING: Found hardcoded 2023 date in SQL: {sql}")
 
+        # Detect MCC granularity level used
+        mcc_granularity = "high_level"
+        if "mcc_original" in sql:
+            mcc_granularity = "detailed"
+        if "mcc_number" in sql:
+            mcc_granularity = "granular"
+
         return {
             "sql_query": sql,
             "query_type": "client_analysis",
+            "mcc_granularity": mcc_granularity,
             "client_id": client_id,
             "original_query": user_query,
-            "optimization_used": "client_id index + compound indexes",
+            "optimization_used": "client_id index + compound indexes + MCC intelligence",
             "date_context_applied": True
         }
 
@@ -233,7 +278,7 @@ def generate_sql_for_benchmark_analysis(
     demographic_filters: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
-    Generate optimized SQL for overall_transactions with current date context.
+    Generate optimized SQL for overall_transactions with current date context and enhanced MCC analysis.
     """
     ds = _ensure_datastore()
     schema = ds.get_schema_info()["overall_transactions"]
@@ -241,7 +286,7 @@ def generate_sql_for_benchmark_analysis(
     # Get current date context
     date_context = get_current_date_context()
 
-    # Build schema description
+    # Build enhanced schema description with MCC intelligence
     schema_desc_lines = [
         "OVERALL_TRANSACTIONS TABLE:",
         f"Description: {schema['description']}",
@@ -251,7 +296,9 @@ def generate_sql_for_benchmark_analysis(
     important_columns = {
         "date": "TEXT (YYYY-MM-DD) - Transaction date",
         "amount": "REAL - Transaction amount in dollars",
-        "mcc_category": "TEXT - Category (use exact matches: 'Groceries', 'Restaurants', 'Transportation', etc.)",
+        "mcc_category": "TEXT - High-level spending category (Restaurants, Groceries, Transportation, etc.)",
+        "mcc_original": "TEXT - Detailed merchant category (e.g., 'Eating Places and Restaurants', 'Fast Food Restaurants')",
+        "mcc_number": "INTEGER - Specific MCC code (e.g., 5812 = Restaurants, 5814 = Fast Food)",
         "current_age": "INTEGER - Customer age",
         "gender": "TEXT - Customer gender",
         "yearly_income": "REAL - Annual income",
@@ -281,26 +328,87 @@ def generate_sql_for_benchmark_analysis(
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", f"""
-You are an expert SQL generator for market benchmark analysis.
-Generate SQLite queries against overall_transactions.
+You are an expert SQL generator for market benchmark analysis with intelligent MCC analysis.
+Generate SQLite queries against overall_transactions with smart MCC granularity detection.
 
 {date_context}
 
 {schema_desc}
 {filter_ctx}
 
+MCC BENCHMARK ANALYSIS INTELLIGENCE:
+
+**MCC GRANULARITY LEVELS FOR BENCHMARKS:**
+1. **HIGH-LEVEL** (mcc_category): Market averages by general category
+   - Examples: Average restaurant spending across demographics
+   - Query: GROUP BY mcc_category
+
+2. **DETAILED** (mcc_category + mcc_original): Specific merchant type benchmarks
+   - Examples: Fast food vs fine dining market averages
+   - Query: GROUP BY mcc_category, mcc_original
+
+3. **GRANULAR** (include mcc_number): Exact MCC code market data
+   - Examples: Specific MCC performance across market segments
+   - Query: SELECT mcc_number, mcc_original, mcc_category
+
+**WHEN TO USE DETAILED MCC FOR BENCHMARKS:**
+- User asks for "detailed comparison", "specific merchant types vs market"
+- User wants "breakdown of restaurant market", "grocery subcategory benchmarks"
+- Comparative analysis: "how do I compare in fast food vs fine dining"
+- Follow-up questions: "what's the market average for each restaurant type"
+
+**BENCHMARK SQL EXAMPLES:**
+
+High-level market averages:
+SELECT mcc_category, AVG(amount) as market_avg, COUNT(*) as market_transactions
+FROM overall_transactions
+WHERE [demographic_filters]
+GROUP BY mcc_category
+ORDER BY market_avg DESC;
+
+Detailed benchmark breakdown:
+SELECT mcc_category, mcc_original, AVG(amount) as market_avg, 
+       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY amount) as market_median
+FROM overall_transactions
+WHERE [demographic_filters]
+GROUP BY mcc_category, mcc_original
+ORDER BY mcc_category, market_avg DESC;
+
+Granular MCC market analysis:
+SELECT mcc_number, mcc_original, mcc_category, 
+       AVG(amount) as market_avg, COUNT(*) as frequency
+FROM overall_transactions
+WHERE [demographic_filters]
+GROUP BY mcc_number, mcc_original, mcc_category
+ORDER BY market_avg DESC;
+
+Restaurant-specific market benchmarks:
+SELECT mcc_original, AVG(amount) as market_avg, COUNT(*) as market_volume
+FROM overall_transactions
+WHERE mcc_category = 'Restaurants' AND [demographic_filters]
+GROUP BY mcc_original
+ORDER BY market_avg DESC;
+
 CRITICAL REQUIREMENTS:
 - Use the CURRENT DATE CONTEXT above for date filtering
 - NEVER use hardcoded years like 2023 - always use the current dates provided
-- For category comparisons, use exact category names like 'Groceries' (not 'grocery')
-- Aggregates: AVG(), COUNT(), SUM()
-- Group by: mcc_category, current_age, gender
-- Use Aliases in your query
+- For category comparisons, use exact category names like 'Restaurants' (not 'restaurant')
+- Apply demographic filters when provided
+- Aggregates: AVG(), COUNT(), SUM(), PERCENTILE_CONT() for benchmarks
+- Group by: mcc_category, mcc_original, mcc_number (based on granularity needed)
+- Use meaningful aliases in your query
 - Indexed columns: date, mcc_category, current_age, gender, amount
 - ENSURE PROPER SQL SYNTAX - no missing parentheses or incomplete clauses
 - RETURN ONLY THE SQL QUERY - no explanations or markdown
 
-EXAMPLE CATEGORY NAMES: 'Groceries', 'Restaurants', 'Transportation', 'Financial Services', 'Entertainment'
+**MCC BENCHMARK DECISION LOGIC:**
+1. Analyze user query for benchmark granularity needs
+2. If detailed market comparison → include mcc_original
+3. If granular market analysis → include mcc_number
+4. If general market benchmarks → use mcc_category only
+5. Always provide comparative market data for meaningful benchmarks
+
+EXAMPLE CATEGORY NAMES: 'Restaurants', 'Groceries', 'Transportation', 'Financial Services', 'Entertainment'
 
 Generate ONLY the SQL query for:
 """),
@@ -308,7 +416,11 @@ Generate ONLY the SQL query for:
     ])
 
     try:
-        llm = ChatOpenAI(model="gpt-4o", temperature=0)
+        llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+            temperature=0,
+        )      
         resp = llm.invoke(prompt.format_messages(user_query=user_query))
         
         if not resp or not resp.content:
@@ -344,12 +456,20 @@ Generate ONLY the SQL query for:
         if sql.count("(") != sql.count(")"):
             return {"error": f"SQL syntax error - mismatched parentheses: {sql}"}
 
+        # Detect MCC granularity level used
+        mcc_granularity = "high_level"
+        if "mcc_original" in sql:
+            mcc_granularity = "detailed"
+        if "mcc_number" in sql:
+            mcc_granularity = "granular"
+
         return {
             "sql_query": sql,
             "query_type": "benchmark_analysis",
+            "mcc_granularity": mcc_granularity,
             "demographic_filters": demographic_filters,
             "original_query": user_query,
-            "optimization_used": "demographic indexes + compound indexes",
+            "optimization_used": "demographic indexes + compound indexes + MCC intelligence",
             "date_context_applied": True
         }
 
@@ -435,8 +555,13 @@ Generate ONLY the SQL query for:
     ])
 
     try:
-        llm = ChatOpenAI(model="gpt-4o", temperature=0)
+        llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+            temperature=0,
+        )      
         resp = llm.invoke(prompt.format_messages(user_query=user_query))
+        print(f"This is LLM {resp.content}")
         
         if not resp or not resp.content:
             return {"error": "No response from LLM"}

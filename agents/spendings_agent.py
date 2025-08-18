@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langgraph.checkpoint.sqlite import SqliteSaver
 # LangGraph imports
 from langgraph.graph import END, START, StateGraph
@@ -27,22 +27,8 @@ sys.path.insert(
     )
 )
 
-# Import the updated DataStore and SQL tools
-# from banking_agent.data_store.data_store import (
-# DataStore,
-# generate_sql_for_client_analysis,
-# generate_sql_for_benchmark_analysis,
-# execute_generated_sql
-# )
 
 from data_store.data_store import DataStore
-# from banking_agent.tools.tools import ( 
-#     generate_sql_for_client_analysis,
-#     generate_sql_for_benchmark_analysis,
-#     execute_generated_sql
-# )
-
-
 from tools.tools import ( 
     generate_sql_for_client_analysis,
     generate_sql_for_benchmark_analysis,
@@ -114,7 +100,11 @@ class SpendingAgent:
         )
 
         # Initialize LLM
-        self.llm = ChatOpenAI(model=model_name, temperature=0)
+        self.llm = AzureChatOpenAI(
+                        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+                        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+                        temperature=0,
+                    )
 
         # Set up structured output parser
         self.intent_parser = PydanticOutputParser(
@@ -902,9 +892,9 @@ I have access to your transaction data and can help with various spending analys
                 "query": user_query,
                 "response": final_state.get("response"),
                 "analysis_type": final_state.get("analysis_type"),
-                "sql_queries": len(final_state.get("sql_queries", [])),
-                "sql_executed": sql_executed,  # NEW: Return actual SQL queries
-                "raw_data": final_state.get("raw_data"),  # NEW: Return raw results
+                "sql_queries": len(final_state.get("sql_queries") or []),
+                "sql_executed": sql_executed,  
+                "raw_data": final_state.get("raw_data"),  
                 "execution_path": final_state.get("execution_path"),
                 "error": final_state.get("error"),
                 "timestamp": datetime.now().isoformat(),
