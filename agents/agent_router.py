@@ -10,7 +10,6 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 import os
@@ -95,8 +94,7 @@ class MultiAgentState(TypedDict):
 
 class EnhancedPersonalFinanceRouter:
     """
-    Enhanced router with real RAG agent collaboration.
-    The RAG agent can now actually collaborate with spending and budget agents.
+    
     """
 
     def __init__(

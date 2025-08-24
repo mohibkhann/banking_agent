@@ -724,6 +724,7 @@ Analyze this query and provide structured classification:"""),
     **RESPONSE STYLE:**
     - Professional but personalized tone
     - Start with acknowledging their specific situation if we have data
+    - Make sure that if you have data make use of it if you dont have data no need to say "I dont have access to your financial data"
     - Provide specific details from both banking information AND their personal data
     - Give concrete recommendations based on their spending/budget patterns
     - End with helpful next steps
