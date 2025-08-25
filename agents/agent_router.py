@@ -27,10 +27,10 @@ sys.path.insert(
 )
 
 # Import our agents
-from agents.spendings_agent import SpendingAgent
-from agents.budget_agent import BudgetAgent
+from banking_agent.agents.spendings_agent import SpendingAgent
+from banking_agent.agents.budget_agent import BudgetAgent
 # Import our enhanced RAG agent
-from agents.rag_agent import RAGAgent
+from banking_agent.agents.rag_agent import RAGAgent
 
 load_dotenv()
 

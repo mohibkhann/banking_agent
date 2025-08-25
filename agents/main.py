@@ -8,11 +8,11 @@ import sys
 import os
 
 # Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 # Import your enhanced router (adjust path as needed)
 try:
-    from agent_router import EnhancedPersonalFinanceRouter
+    from banking_agent.agents.agent_router import EnhancedPersonalFinanceRouter
 except ImportError:
     st.error("Could not import PersonalFinanceRouter. Please check the file path.")
     st.stop()
