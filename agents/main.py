@@ -3,18 +3,18 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime, timedelta
-import json
 import sys
 import os
+
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-# Import your enhanced router (adjust path as needed)
+
 try:
     from banking_agent.agents.agent_router import EnhancedPersonalFinanceRouter
 except ImportError:
-    st.error("Could not import PersonalFinanceRouter. Please check the file path.")
+    st.error("Could not import EnhancedPersonalFinanceRouter. Please check the file path.")
     st.stop()
 
 # Page configuration
@@ -90,6 +90,39 @@ st.markdown("""
     .logo-container {
         margin-bottom: 1.5rem;
     }
+
+    /* ---- Dynamic purple flow behind GXBank heading ---- */
+    .logo-container{ 
+    position:relative; 
+    display:inline-block; 
+    padding:.25rem .75rem;      /* gives the glow some room */
+    border-radius:28px;
+    isolation:isolate;          /* keeps z-index tidy */
+    }
+    .logo-container::before{
+    content:"";
+    position:absolute;
+    inset:-36px -56px;          /* size of the glow area */
+    z-index:0;
+    background:
+        radial-gradient(40% 60% at 20% 30%, rgba(168,85,247,.65), transparent 60%),
+        radial-gradient(50% 60% at 80% 20%, rgba(236,72,153,.55), transparent 60%),
+        radial-gradient(60% 70% at 40% 85%, rgba(124,58,237,.60), transparent 60%);
+    filter: blur(38px) saturate(1.15);
+    animation: gxFlow 10s ease-in-out infinite alternate;
+    border-radius:32px;
+    }
+    .gx-logo{ 
+    position:relative; 
+    z-index:1;                   /* keep text above the flow */
+    }
+
+    @keyframes gxFlow{
+    0%   { transform: translate3d(-12px, 2px, 0) scale(1); }
+    50%  { transform: translate3d(10px, -10px, 0) scale(1.03); }
+    100% { transform: translate3d(-6px, 6px, 0) scale(1); }
+    }
+
     
     .gx-logo {
         font-size: 3.5rem;

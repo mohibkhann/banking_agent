@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 from dotenv import load_dotenv
+from langchain_core.prompts import MessagesPlaceholder
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -123,7 +124,6 @@ class EnhancedPersonalFinanceRouter:
             memory=False  # We'll handle memory at router level
         )
 
-        # ENHANCED: Initialize RAG agent with references to other agents
         print("🔍 Loading Enhanced RAG Agent with collaboration...")
         self.rag_agent = RAGAgent(
             client_csv_path=client_csv_path,
@@ -200,6 +200,8 @@ class EnhancedPersonalFinanceRouter:
             print("🧠 [DEBUG] Managing conversation context...")
 
             user_query = state["user_query"].strip()
+            state["messages"].append(HumanMessage(content=user_query))
+
             common_followups = ['ok', 'yes', 'no', 'show', 'tell', 'more', 'continue', 'please']
             query_words = user_query.lower().split()
             
@@ -372,18 +374,23 @@ Query: "{query_for_routing}"
 Original input: "{original_query}"
 """
                     ),
+
+                    MessagesPlaceholder("history"),
+                
                     (
                         "human",
                         "Route this query and respond with a JSON object containing the routing decision."
                     )
                 ])
+                history = state["messages"][-6:]  # this depends on the token usage
+                msgs = routing_prompt.format_messages(
+                    history=history,
+                    query_for_routing=query_for_routing,
+                    original_query=original_query,
+                    recent_context=recent_context
+)
 
-                response = self.llm.invoke(
-                    routing_prompt.format_messages(
-                        query_for_routing=query_for_routing,
-                        original_query=original_query,
-                        recent_context=recent_context
-                    )
+                response = self.llm.invoke(msgs
                 )
                 
                 # Parse JSON response
@@ -684,6 +691,11 @@ Original input: "{original_query}"
                         prefix = f"Switching to {agent_used} analysis... "
                 
                 state["final_response"] = prefix + primary_response
+                # record the model’s reply
+                if state.get("final_response"):
+                    state["messages"].append(AIMessage(content=state["final_response"]))
+
+
                 
                 # Add intelligent cross-agent suggestions
                 recent_topics = context.recent_topics if context else []
@@ -990,8 +1002,8 @@ def interactive_chat_demo():
                 session_id=session_id
             )
 
-            print(f"🤖 **{result['agent_used'].upper()}**: {result['response']}")
-            print(f"⚙️ *Success: {result['success']}*")
+            print(f"**{result['agent_used'].upper()}**: {result['response']}")
+            print(f"*Success: {result['success']}*")
             
             if result.get('error'):
                 print(f"❌ *Error: {result['error']}*")
