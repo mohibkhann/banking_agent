@@ -100,11 +100,19 @@ class SpendingAgent:
         )
 
         # Initialize LLM
-        self.llm = AzureChatOpenAI(
-                        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
-                        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
-                        temperature=0,
-                    )
+        # self.llm = AzureChatOpenAI(
+        #                 azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+        #                 api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+        #                 temperature=0,
+        #             )
+
+
+        self.llm = ChatOpenAI(
+            model="gpt-4o-mini",   
+            temperature=0,
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            )
+                        
 
         # Set up structured output parser
         self.intent_parser = PydanticOutputParser(

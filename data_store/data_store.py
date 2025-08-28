@@ -628,29 +628,224 @@ class DataStore:
 
         return rows, cols
 
-    # Budget-specific methods
-    def create_budget(self, client_id: int, category: str, monthly_limit: float, budget_type: str = "fixed") -> bool:
-        """Create or update a budget for a client."""
+    def create_or_update_budget(self, client_id: int, category: str, monthly_limit: float, budget_type: str = "fixed") -> Dict[str, Any]:
+        """Create or update a budget for a client with proper handling."""
         try:
-            # Deactivate existing budget for this category
+            # Check if budget already exists
+            existing_budget = self.conn.execute(
+                "SELECT id, monthly_limit FROM user_budgets WHERE client_id = ? AND category = ? AND is_active = 1",
+                (client_id, category)
+            ).fetchone()
+            
+            if existing_budget:
+                # Update existing budget
+                budget_id, old_limit = existing_budget
+                self.conn.execute(
+                    """
+                    UPDATE user_budgets 
+                    SET monthly_limit = ?, budget_type = ?, updated_date = ?
+                    WHERE id = ?
+                    """,
+                    (monthly_limit, budget_type, datetime.now().isoformat(), budget_id)
+                )
+                
+                action = "updated"
+                message = f"Updated {category} budget from ${old_limit:.2f} to ${monthly_limit:.2f}"
+            else:
+                # Create new budget
+                self.conn.execute(
+                    """
+                    INSERT INTO user_budgets (client_id, category, monthly_limit, budget_type, created_date, updated_date, is_active)
+                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (client_id, category, monthly_limit, budget_type, datetime.now().isoformat(), datetime.now().isoformat())
+                )
+                
+                action = "created"
+                message = f"Created new {category} budget of ${monthly_limit:.2f}"
+            
+            self.conn.commit()
+            
+            # Update budget tracking for current month to reflect changes
+            current_month = datetime.now().strftime("%Y-%m")
+            self.update_budget_tracking(client_id, current_month)
+            
+            return {
+                "success": True,
+                "action": action,
+                "message": message,
+                "category": category,
+                "monthly_limit": monthly_limit,
+                "budget_type": budget_type
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to create/update budget: {e}")
+            self.conn.rollback()
+            return {
+                "success": False,
+                "error": str(e),
+                "message": f"Failed to {action if 'action' in locals() else 'create/update'} budget for {category}"
+            }
+
+    def delete_budget(self, client_id: int, category: str) -> Dict[str, Any]:
+        """Delete (soft-deactivate) a budget for a specific category, handling UNIQUE constraint."""
+        try:
+            category = category.title().strip()
+
+            # 1) Look up active budget
+            existing_budget = self.conn.execute(
+                "SELECT id, monthly_limit FROM user_budgets WHERE client_id=? AND category=? AND is_active=1",
+                (client_id, category)
+            ).fetchone()
+
+            if not existing_budget:
+                return {
+                    "success": False,
+                    "error": "Budget not found",
+                    "message": f"No active budget found for {category}"
+                }
+
+            budget_id, monthly_limit = existing_budget
+            now_iso = datetime.now().isoformat()
+            current_month = datetime.now().strftime("%Y-%m")
+
+            # 2) Begin transaction
+            self.conn.execute("BEGIN")
+
+            # 3) Remove any prior inactive duplicates for this client/category
             self.conn.execute(
-                "UPDATE user_budgets SET is_active = 0 WHERE client_id = ? AND category = ?",
+                "DELETE FROM user_budgets WHERE client_id=? AND category=? AND is_active=0",
                 (client_id, category)
             )
-            
-            # Insert new budget
+
+            # 4) Flip the active row to inactive
             self.conn.execute(
-                """
-                INSERT INTO user_budgets (client_id, category, monthly_limit, budget_type, created_date, is_active)
-                VALUES (?, ?, ?, ?, ?, 1)
-                """,
-                (client_id, category, monthly_limit, budget_type, datetime.now().isoformat())
+                "UPDATE user_budgets SET is_active=0, updated_date=? WHERE id=?",
+                (now_iso, budget_id)
             )
+
+            # 5) Clean future tracking
+            self.conn.execute(
+                "DELETE FROM budget_tracking WHERE client_id=? AND category=? AND month>=?",
+                (client_id, category, current_month)
+            )
+
+            # 6) Commit
             self.conn.commit()
-            return True
+
+            return {
+                "success": True,
+                "message": f"Successfully deleted {category} budget (${monthly_limit:.2f})",
+                "category": category,
+                "deleted_limit": monthly_limit
+            }
+
         except Exception as e:
-            logger.error(f"Failed to create budget: {e}")
-            return False
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            return {
+                "success": False,
+                "error": str(e),
+                "message": f"Failed to delete budget for {category}"
+            }
+
+
+    def list_client_budgets_detailed(self, client_id: int) -> Dict[str, Any]:
+        """Get detailed budget information including tracking data."""
+        try:
+            # Get active budgets
+            budgets_query = """
+            SELECT category, monthly_limit, budget_type, created_date, updated_date
+            FROM user_budgets 
+            WHERE client_id = ? AND is_active = 1 
+            ORDER BY category
+            """
+            
+            budget_rows, budget_cols = self.execute_sql_query(budgets_query, (client_id,))
+            budgets_df = pd.DataFrame(budget_rows, columns=budget_cols)
+            
+            if budgets_df.empty:
+                return {
+                    "success": True,
+                    "message": "No active budgets found",
+                    "budgets": [],
+                    "total_budgeted": 0.0
+                }
+            
+            # Get current month tracking data
+            current_month = datetime.now().strftime("%Y-%m")
+            tracking_query = """
+            SELECT category, budgeted_amount, actual_amount, variance_amount, variance_percentage
+            FROM budget_tracking 
+            WHERE client_id = ? AND month = ?
+            """
+            
+            tracking_rows, tracking_cols = self.execute_sql_query(tracking_query, (client_id, current_month))
+            tracking_df = pd.DataFrame(tracking_rows, columns=tracking_cols)
+            
+            # Combine budget and tracking data
+            budget_list = []
+            total_budgeted = 0.0
+            
+            for _, budget in budgets_df.iterrows():
+                category = budget['category']
+                monthly_limit = budget['monthly_limit']
+                total_budgeted += monthly_limit
+                
+                # Find tracking data for this category
+                tracking_data = tracking_df[tracking_df['category'] == category]
+                
+                budget_info = {
+                    "category": category,
+                    "monthly_limit": monthly_limit,
+                    "budget_type": budget['budget_type'],
+                    "created_date": budget['created_date'],
+                    "updated_date": budget['updated_date']
+                }
+                
+                if not tracking_data.empty:
+                    track = tracking_data.iloc[0]
+                    budget_info.update({
+                        "current_month_actual": track['actual_amount'],
+                        "variance_amount": track['variance_amount'],
+                        "variance_percentage": track['variance_percentage'],
+                        "status": "over_budget" if track['variance_amount'] > 0 else "under_budget"
+                    })
+                else:
+                    budget_info.update({
+                        "current_month_actual": 0.0,
+                        "variance_amount": 0.0,
+                        "variance_percentage": 0.0,
+                        "status": "no_tracking_data"
+                    })
+                
+                budget_list.append(budget_info)
+            
+            return {
+                "success": True,
+                "budgets": budget_list,
+                "total_budgeted": total_budgeted,
+                "budget_count": len(budget_list),
+                "current_month": current_month
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get detailed budgets: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "budgets": [],
+                "total_budgeted": 0.0
+            }
+
+    def create_budget(self, client_id: int, category: str, monthly_limit: float, budget_type: str = "fixed") -> bool:
+        """Legacy method - redirects to create_or_update_budget for backward compatibility."""
+        result = self.create_or_update_budget(client_id, category, monthly_limit, budget_type)
+        return result["success"]
+
 
     def get_client_budgets(self, client_id: int) -> pd.DataFrame:
         """Get all active budgets for a client."""

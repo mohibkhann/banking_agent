@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 # Import the DataStore 
 # from banking_agent.data_store.data_store import DataStore
+from typing import Any, Dict, List, Optional, TypedDict, Annotated
 
 from data_store.data_store import DataStore
 
@@ -211,11 +212,16 @@ def generate_sql_for_client_analysis(
             ])
 
     try:
-        llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+        # llm = AzureChatOpenAI(
+        #     azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+        #     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+        #     temperature=0,
+        # )   
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",   
             temperature=0,
-        )        
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            )     
         resp = llm.invoke(prompt.format_messages(user_query=user_query))
         
         if not resp or not resp.content:
@@ -416,11 +422,18 @@ Generate ONLY the SQL query for:
     ])
 
     try:
-        llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+        # llm = AzureChatOpenAI(
+        #     azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+        #     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+        #     temperature=0,
+        # )  
+
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",   
             temperature=0,
-        )      
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            )
+                           
         resp = llm.invoke(prompt.format_messages(user_query=user_query))
         
         if not resp or not resp.content:
@@ -519,6 +532,8 @@ CLIENT_TRANSACTIONS TABLE (for real-time calculations):
 - date: TEXT (YYYY-MM-DD) - Transaction date
 - amount: REAL - Transaction amount
 - mcc_category: TEXT - Spending category
+- mcc_original: TEXT - Exact Category
+- yearly_income: REAL - Yearly Income 
 """
 
     prompt = ChatPromptTemplate.from_messages([
@@ -555,11 +570,17 @@ Generate ONLY the SQL query for:
     ])
 
     try:
-        llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
-            temperature=0,
-        )      
+        # llm = AzureChatOpenAI(
+        #     azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+        #     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+        #     temperature=0,
+        # )   
+        # 
+        llm = ChatOpenAI(
+    model="gpt-4o-mini",   
+    temperature=0,
+    openai_api_key=os.getenv("OPENAI_API_KEY"),
+    )   
         resp = llm.invoke(prompt.format_messages(user_query=user_query))
         print(f"This is LLM {resp.content}")
         
@@ -662,7 +683,8 @@ def execute_generated_sql(
             "execution_timestamp": datetime.now().isoformat()
         }
 
-@tool 
+
+@tool
 def create_or_update_budget(
     client_id: int,
     category: str,
@@ -670,35 +692,233 @@ def create_or_update_budget(
     budget_type: str = "fixed"
 ) -> Dict[str, Any]:
     """
-    Create or update a budget for a specific client and category.
-    """
-    ds = _ensure_datastore()
+    Create a new budget or update existing budget for a client and category.
     
+    Args:
+        client_id: The client's unique identifier
+        category: Budget category (e.g., 'Groceries', 'Restaurants', 'Gas')
+        monthly_limit: Monthly spending limit in dollars
+        budget_type: Type of budget ('fixed', 'percentage', 'goal_based')
+    
+    Returns:
+        Dict with success status, action taken, and details
+    """
     try:
-        success = ds.create_budget(client_id, category, monthly_limit, budget_type)
+        # Get data store instance
+        ds = _ensure_datastore()
         
-        if success:
-            return {
-                "success": True,
-                "message": f"Budget created/updated: {category} = ${monthly_limit:.2f}/month",
-                "client_id": client_id,
-                "category": category,
-                "monthly_limit": monthly_limit,
-                "budget_type": budget_type
-            }
-        else:
+        if not ds:
             return {
                 "success": False,
-                "error": "Failed to create/update budget",
-                "client_id": client_id,
-                "category": category
+                "error": "Data store not available",
+                "message": "Cannot access budget data"
             }
+        
+        # Validate inputs
+        if monthly_limit <= 0:
+            return {
+                "success": False,
+                "error": "Invalid amount",
+                "message": "Monthly limit must be greater than 0"
+            }
+        
+        # Normalize category name
+        category = category.title().strip()
+        
+        # Execute the create/update operation
+        result = ds.create_or_update_budget(
+            client_id=client_id,
+            category=category,
+            monthly_limit=monthly_limit,
+            budget_type=budget_type
+        )
+        
+        return result
+        
     except Exception as e:
         return {
             "success": False,
-            "error": f"Budget operation failed: {e}",
-            "client_id": client_id,
-            "category": category
+            "error": str(e),
+            "message": f"Failed to create/update budget for {category}"
+        }
+    
+
+@tool
+def delete_budget(client_id: int, category: str) -> Dict[str, Any]:
+    """Delete (soft-deactivate) a budget for a specific category."""
+    try:
+        ds = _ensure_datastore()
+        if not ds:
+            return {
+                "success": False,
+                "error": "Data store not available",
+                "message": "Cannot access budget data"
+            }
+
+        if not category or not isinstance(category, str):
+            return {
+                "success": False,
+                "error": "Invalid category",
+                "message": "Provide a non-empty category name"
+            }
+
+        # Keep behavior consistent with create/update
+        category = category.title().strip()
+
+        return ds.delete_budget(client_id=client_id, category=category)
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"Failed to delete budget for {category if category else 'unknown category'}"
+        }
+
+
+@tool
+def list_all_budgets(
+    client_id: int
+) -> Dict[str, Any]:
+    """
+    List all budgets for a client with detailed tracking information.
+    
+    Args:
+        client_id: The client's unique identifier
+    
+    Returns:
+        Dict with budget list and summary information
+    """
+    try:
+        # Get data store instance
+        ds = _ensure_datastore()
+        
+        if not ds:
+            return {
+                "success": False,
+                "error": "Data store not available",
+                "message": "Cannot access budget data"
+            }
+        
+        # Get detailed budget information
+        result = ds.list_client_budgets_detailed(client_id)
+        
+        return result
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Failed to retrieve budget list"
+        }
+
+
+@tool
+def bulk_budget_operations(
+    client_id: int,
+    operations: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Perform multiple budget operations in batch.
+    
+    Args:
+        client_id: The client's unique identifier
+        operations: List of operations, each with 'action', 'category', and optional 'monthly_limit', 'budget_type'
+                   Actions: 'create', 'update', 'delete'
+    
+    Returns:
+        Dict with results of all operations
+    """
+    try:
+        # Get data store instance
+        ds = _ensure_datastore()
+
+        
+        if not ds:
+            return {
+                "success": False,
+                "error": "Data store not available",
+                "message": "Cannot access budget data"
+            }
+        
+        results = []
+        successful_operations = 0
+        
+        for i, operation in enumerate(operations):
+            try:
+                action = operation.get('action', '').lower()
+                category = operation.get('category', '').title().strip()
+                
+                if not category:
+                    results.append({
+                        "index": i,
+                        "success": False,
+                        "error": "Missing category",
+                        "action": action
+                    })
+                    continue
+                
+                if action in ['create', 'update']:
+                    monthly_limit = operation.get('monthly_limit', 0)
+                    budget_type = operation.get('budget_type', 'fixed')
+                    
+                    if monthly_limit <= 0:
+                        results.append({
+                            "index": i,
+                            "success": False,
+                            "error": "Invalid monthly limit",
+                            "category": category,
+                            "action": action
+                        })
+                        continue
+                    
+                    result = ds.create_or_update_budget(
+                        client_id, category, monthly_limit, budget_type
+                    )
+                    
+                elif action == 'delete':
+                    result = ds.delete_budget(client_id, category)
+                    
+                else:
+                    results.append({
+                        "index": i,
+                        "success": False,
+                        "error": f"Unknown action: {action}",
+                        "category": category,
+                        "action": action
+                    })
+                    continue
+                
+                # Add index and action to result
+                result["index"] = i
+                result["action"] = action
+                results.append(result)
+                
+                if result.get("success", False):
+                    successful_operations += 1
+                    
+            except Exception as e:
+                results.append({
+                    "index": i,
+                    "success": False,
+                    "error": str(e),
+                    "category": operation.get('category', 'Unknown'),
+                    "action": operation.get('action', 'Unknown')
+                })
+        
+        return {
+            "success": successful_operations > 0,
+            "total_operations": len(operations),
+            "successful_operations": successful_operations,
+            "failed_operations": len(operations) - successful_operations,
+            "results": results
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Bulk budget operations failed",
+            "results": []
         }
 
 @tool

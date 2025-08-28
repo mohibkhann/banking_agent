@@ -107,11 +107,13 @@ class SmartBrandTranslator:
         
         # Initialize LLM
         try:
-            self.llm = AzureChatOpenAI(
-                            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
-                            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
-                            temperature=0,
-                        )
+
+            self.llm = ChatOpenAI(
+                model="gpt-4o", 
+                temperature=0,
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+            )
+
             print(f"✅ Initialized brand translator with {model_name}")
         except Exception as e:
             print(f"⚠️ Failed to initialize LLM: {e}")

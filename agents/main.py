@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 
 
 try:
-    from banking_agent.agents.agent_router import EnhancedPersonalFinanceRouter
+    from agent_router import EnhancedPersonalFinanceRouter
 except ImportError:
     st.error("Could not import EnhancedPersonalFinanceRouter. Please check the file path.")
     st.stop()

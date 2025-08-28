@@ -41,16 +41,17 @@ from tools.tools import (
     generate_sql_for_budget_analysis,
     execute_generated_sql,
     create_or_update_budget,
-    update_budget_tracking_for_month)
+    update_budget_tracking_for_month,
+    delete_budget,            
+    list_all_budgets   )
 load_dotenv()
 
 
-# Pydantic models for structured output
 class BudgetIntentClassification(BaseModel):
-    """Structured intent classification for budget queries"""
+    """structured intent classification for budget queries"""
 
     analysis_type: str = Field(
-        description="Type of analysis: budget_creation, budget_tracking, budget_optimization, or goal_planning"
+        description="Type of analysis: budget_creation, budget_update, budget_deletion, budget_listing, budget_tracking, budget_optimization, or goal_planning"
     )
     requires_budget_data: bool = Field(
         description="Whether existing budget data is needed"
@@ -61,8 +62,19 @@ class BudgetIntentClassification(BaseModel):
     requires_budget_update: bool = Field(
         description="Whether budget creation/modification is needed"
     )
+    requires_budget_deletion: bool = Field(
+        default=False,
+        description="Whether budget deletion is needed"
+    )
     query_focus: str = Field(
-        description="Main focus: performance_review, budget_setup, overspend_analysis, or optimization"
+        description="Main focus: performance_review, budget_setup, budget_modification, budget_deletion, budget_display, overspend_analysis, or optimization"
+    )
+    target_categories: List[str] = Field(
+        default=[],
+        description="Specific budget categories mentioned (e.g., ['Groceries', 'Restaurants'])"
+    )
+    operation_type: str = Field(
+        description="Specific operation: create, update, delete, list, track, analyze"
     )
     time_period: str = Field(
         description="Time scope: current_month, last_month, quarterly, or historical"
@@ -70,7 +82,6 @@ class BudgetIntentClassification(BaseModel):
     confidence: float = Field(
         description="Confidence score between 0 and 1", ge=0.0, le=1.0
     )
-
 
 class BudgetAgentState(TypedDict):
     """Enhanced state for Budget Agent workflow"""
@@ -91,14 +102,15 @@ class BudgetAgentState(TypedDict):
 class BudgetAgent:
     """Budget Management Agent with SQL-first approach for budget analysis and management"""
 
+
     def __init__(
-        self,
-        client_csv_path: str,
-        overall_csv_path: str,
-        model_name: str = "gpt-4o",
-        memory: bool = True,
-    ):
-        print(f"💰 Initializing BudgetAgent with budget management capabilities...")
+    self,
+    client_csv_path: str,
+    overall_csv_path: str,
+    model_name: str = "gpt-4o",
+    memory: bool = True,
+):
+        print(f"💰 Initializing BudgetAgent with enhanced budget management capabilities...")
         print(f"📥 Client data: {client_csv_path}")
         print(f"📊 Overall data: {overall_csv_path}")
 
@@ -108,23 +120,27 @@ class BudgetAgent:
         )
 
         # Initialize LLM
-        self.llm = AzureChatOpenAI(
-                        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
-                        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
-                        temperature=0,
+        self.llm = ChatOpenAI(
+                    model="gpt-4o",   
+                    temperature=0,
+                    openai_api_key=os.getenv("OPENAI_API_KEY"),
                     )
+                        
+
 
         # Set up structured output parser
         self.intent_parser = PydanticOutputParser(
             pydantic_object=BudgetIntentClassification
         )
 
-        # Budget-focused tools
+        # Enhanced budget-focused tools
         self.budget_tools = [
             generate_sql_for_client_analysis,
             generate_sql_for_budget_analysis,
             execute_generated_sql,
-            create_or_update_budget,
+            create_or_update_budget,  # Updated tool
+            delete_budget,            
+            list_all_budgets,         
             update_budget_tracking_for_month,
         ]
 
@@ -133,7 +149,9 @@ class BudgetAgent:
 
         # Build the budget-focused graph
         self.graph = self._build_graph()
-        print("✅ BudgetAgent initialized with budget management capabilities!")
+        print("✅ BudgetAgent initialized with enhanced budget management capabilities!")
+
+
 
     def _build_graph(self) -> StateGraph:
         """Build the budget-focused LangGraph workflow"""
@@ -163,9 +181,10 @@ class BudgetAgent:
         workflow.add_edge("error_handler", END)
 
         return workflow.compile(checkpointer=self.memory)
+    
 
     def _intent_classifier_node(self, state: BudgetAgentState) -> BudgetAgentState:
-        """Enhanced intent classification for budget queries"""
+        """Enhanced intent classification for budget queries with full CRUD support"""
 
         try:
             print(f"💰 [DEBUG] Classifying budget intent for: {state['user_query']}")
@@ -174,36 +193,75 @@ class BudgetAgent:
                 [
                     (
                         "system",
-                        """You are an AI assistant that classifies user queries about budget management.
+                        """You are an AI assistant that classifies user queries about budget management with full CRUD operations support.
 
-Analyze the user's query and determine:
+    Analyze the user's query and determine:
 
-1. **Analysis Type:**
-- "budget_creation": Creating new budgets or setting budget limits
-- "budget_tracking": Monitoring current budget performance vs actual spending
-- "budget_optimization": Improving existing budgets or finding savings
-- "goal_planning": Integrating budgets with financial goals
+    1. **Analysis Type:**
+    - "budget_creation": Creating new budgets or setting budget limits
+    - "budget_update": Modifying existing budget amounts or settings
+    - "budget_deletion": Removing/deleting existing budgets
+    - "budget_listing": Showing/displaying current budgets
+    - "budget_tracking": Monitoring current budget performance vs actual spending
+    - "budget_optimization": Improving existing budgets or finding savings
+    - "goal_planning": Integrating budgets with financial goals
 
-2. **Data Requirements:**
-- requires_budget_data: true if need existing budget information
-- requires_transaction_data: true if need spending transaction analysis
-- requires_budget_update: true if need to create/modify budgets
+    2. **Operation Type:**
+    - "create": Creating new budgets
+    - "update": Modifying existing budgets  
+    - "delete": Removing budgets
+    - "list": Displaying budgets
+    - "track": Monitoring performance
+    - "analyze": Analysis and insights
 
-3. **Query Focus:**
-- "performance_review": How am I doing against my budget?
-- "budget_setup": Create/modify budget allocations
-- "overspend_analysis": Where am I overspending?
-- "optimization": How can I improve my budget?
+    3. **Data Requirements:**
+    - requires_budget_data: true if need existing budget information
+    - requires_transaction_data: true if need spending transaction analysis
+    - requires_budget_update: true if need to create/modify budgets
+    - requires_budget_deletion: true if need to delete budgets
 
-4. **Time Period:**
-- "current_month": This month's budget performance
-- "last_month": Previous month analysis
-- "quarterly": 3-month budget review
-- "historical": Long-term budget trends
+    4. **Query Focus:**
+    - "performance_review": How am I doing against my budget?
+    - "budget_setup": Create new budget allocations
+    - "budget_modification": Update existing budget amounts
+    - "budget_deletion": Remove specific budgets
+    - "budget_display": Show current budgets
+    - "overspend_analysis": Where am I overspending?
+    - "optimization": How can I improve my budget?
 
-{format_instructions}
+    5. **Target Categories:**
+    - Extract specific categories mentioned: groceries, restaurants, gas, utilities, entertainment, etc.
+    - Return as list: ["Groceries", "Restaurants"] or [] if none specified
 
-Analyze this budget query and provide structured classification:""",
+    6. **Time Period:**
+    - "current_month": This month's budget performance
+    - "last_month": Previous month analysis
+    - "quarterly": 3-month budget review
+    - "historical": Long-term budget trends
+
+    **EXAMPLES:**
+
+    "Create a $800 budget for groceries"
+    → analysis_type: "budget_creation", operation_type: "create", target_categories: ["Groceries"], requires_budget_update: true
+
+    "Update my restaurants budget to $600"  
+    → analysis_type: "budget_update", operation_type: "update", target_categories: ["Restaurants"], requires_budget_update: true
+
+    "Delete my entertainment budget"
+    → analysis_type: "budget_deletion", operation_type: "delete", target_categories: ["Entertainment"], requires_budget_deletion: true
+
+    "Show me all my budgets"
+    → analysis_type: "budget_listing", operation_type: "list", requires_budget_data: true
+
+    "How am I doing against my grocery budget?"
+    → analysis_type: "budget_tracking", operation_type: "track", target_categories: ["Groceries"]
+
+    "Remove the gas and utilities budgets"
+    → analysis_type: "budget_deletion", operation_type: "delete", target_categories: ["Gas", "Utilities"]
+
+    {format_instructions}
+
+    Analyze this budget query and provide structured classification:""",
                     ),
                     ("human", "{user_query}"),
                 ]
@@ -223,7 +281,8 @@ Analyze this budget query and provide structured classification:""",
                 intent_dict = intent_result.model_dump()
 
                 print(f"[DEBUG] Budget intent classified as: {intent_dict['analysis_type']}")
-                print(f"[DEBUG] Focus: {intent_dict['query_focus']}")
+                print(f"[DEBUG] Operation: {intent_dict['operation_type']}, Categories: {intent_dict['target_categories']}")
+                print(f"[DEBUG] Focus: {intent_dict['query_focus']}, Confidence: {intent_dict['confidence']}")
 
                 state["intent"] = intent_dict
                 state["analysis_type"] = intent_dict["analysis_type"]
@@ -231,14 +290,14 @@ Analyze this budget query and provide structured classification:""",
 
                 state["messages"].append(
                     AIMessage(
-                        content=f"Budget query classified as {state['analysis_type']} analysis. Processing budget request..."
+                        content=f"Budget query classified as {intent_dict['analysis_type']} with {intent_dict['operation_type']} operation. Processing budget request..."
                     )
                 )
 
             except Exception as parse_error:
-                print(f"[DEBUG] Structured parsing failed, using fallback: {parse_error}")
+                print(f"[DEBUG] Structured parsing failed, using enhanced fallback: {parse_error}")
 
-                fallback_result = self._fallback_budget_classification(
+                fallback_result = self._enhanced_fallback_budget_classification(
                     state["user_query"]
                 )
                 state["intent"] = fallback_result
@@ -250,53 +309,7 @@ Analyze this budget query and provide structured classification:""",
             state["error"] = f"Budget intent classification error: {str(e)}"
 
         return state
-
-    def _fallback_budget_classification(self, user_query: str) -> Dict[str, Any]:
-        """Fallback budget intent classification using keywords"""
-
-        print("Going for fallback")
-
-        query_lower = user_query.lower()
-
-        # Budget-specific keyword classification
-        creation_keywords = ["create", "set up", "new budget", "budget for", "allocate"]
-        tracking_keywords = ["how am i doing", "budget performance", "vs budget", "overspend"]
-        optimization_keywords = ["save money", "cut spending", "optimize", "improve budget"]
-        
-        if any(keyword in query_lower for keyword in creation_keywords):
-            analysis_type = "budget_creation"
-            query_focus = "budget_setup"
-            requires_budget_update = True
-        elif any(keyword in query_lower for keyword in tracking_keywords):
-            analysis_type = "budget_tracking"
-            query_focus = "performance_review"
-            requires_budget_update = False
-        elif any(keyword in query_lower for keyword in optimization_keywords):
-            analysis_type = "budget_optimization"
-            query_focus = "optimization"
-            requires_budget_update = False
-        else:
-            analysis_type = "budget_tracking"  # 
-            query_focus = "performance_review"
-            requires_budget_update = False
-
-        # Time period detection
-        if "this month" in query_lower or "current" in query_lower:
-            time_period = "current_month"
-        elif "last month" in query_lower:
-            time_period = "last_month"
-        else:
-            time_period = "current_month"
-
-        return {
-            "analysis_type": analysis_type,
-            "requires_budget_data": True,
-            "requires_transaction_data": True,
-            "requires_budget_update": requires_budget_update,
-            "query_focus": query_focus,
-            "time_period": time_period,
-            "confidence": 0.7,  # Lower confidence for fallback
-        }
+    
 
     def _budget_analyzer_node(self, state: BudgetAgentState) -> BudgetAgentState:
         """Analyze budget requirements and generate appropriate queries/operations"""
@@ -348,12 +361,42 @@ Analyze this budget query and provide structured classification:""",
                 except Exception as e:
                     print(f"⚠️ Budget analysis error: {e}")
 
-            # Handle budget creation/update requests
-            if intent.get("requires_budget_update", False):
+            # NEW: Handle all budget operations based on operation type
+            operation_type = intent.get("operation_type", "")
+            target_categories = intent.get("target_categories", [])
+            
+            if operation_type == "create" or operation_type == "update":
+                # Handle budget creation/update requests
                 budget_operation = self._extract_budget_creation_params(state["user_query"])
                 if budget_operation:
                     budget_operations.append(budget_operation)
-                    print(f"✅ Identified budget operation: {budget_operation}")
+                    print(f"✅ Identified {operation_type} operation: {budget_operation}")
+            
+            elif operation_type == "delete":
+                # Handle budget deletion requests
+                if target_categories:
+                    for category in target_categories:
+                        budget_operations.append({
+                            "operation_type": "delete_budget",
+                            "category": category
+                        })
+                        print(f"✅ Identified delete operation for: {category}")
+                else:
+                    # Try to extract category from query if not in intent
+                    extracted_categories = self._extract_categories_from_query(state["user_query"])
+                    for category in extracted_categories:
+                        budget_operations.append({
+                            "operation_type": "delete_budget", 
+                            "category": category
+                        })
+                        print(f"✅ Identified delete operation for: {category}")
+            
+            elif operation_type == "list":
+                # Handle budget listing requests
+                budget_operations.append({
+                    "operation_type": "list_budgets"
+                })
+                print(f"✅ Identified list operation")
 
             state["sql_queries"] = sql_queries
             state["budget_operations"] = budget_operations
@@ -367,6 +410,333 @@ Analyze this budget query and provide structured classification:""",
 
         return state
 
+
+    def _extract_categories_from_query(self, user_query: str) -> List[str]:
+        """Extract budget categories from user query"""
+        
+        query_lower = user_query.lower()
+        
+        # Enhanced category detection
+        category_patterns = {
+            # Groceries
+            "Groceries": [
+                "grocery", "groceries", "food shopping", "supermarket", "food stores"
+            ],
+
+            # Restaurants
+            "Restaurants": [
+                "restaurant", "restaurants", "dining", "eating out", "takeout", "fast food"
+            ],
+
+            # Bars & Alcohol
+            "Bars & Alcohol": [
+                "bars", "bar", "drinks", "alcohol", "nightlife", "liquor", "beer", "wine"
+            ],
+
+            # Utilities
+            "Utilities": [
+                "utilities", "utility", "electric", "electricity", "water", "heating", "gas", "sanitary"
+            ],
+
+            # Insurance
+            "Insurance": [
+                "insurance", "underwriting", "policy", "coverage", "premium"
+            ],
+
+            # Financial Services
+            "Financial Services": [
+                "money transfer", "remittance", "wire transfer", "banking service"
+            ],
+
+            # Shopping / Retail
+            "Wholesale & Retail": [
+                "shopping", "clothes", "clothing", "retail", "wholesale", "discount store", "department store"
+            ],
+
+            # Clothing & Apparel
+            "Clothing & Apparel": [
+                "clothing", "clothes", "apparel", "fashion", "shoe", "wear", "garments"
+            ],
+
+            # Pharmacy
+            "Pharmacy": [
+                "pharmacy", "medicine", "drugs", "prescriptions", "drugstore"
+            ],
+
+            # Healthcare
+            "Healthcare": [
+                "healthcare", "health", "medical", "doctor", "dentist", "hospital",
+                "optical", "chiropractor", "clinic", "podiatrist"
+            ],
+
+            # Transportation
+            "Transportation": [
+                "transportation", "transport", "travel", "commute", "taxi", "bus",
+                "train", "rail", "airline", "flight", "cruise", "freight", "toll", "bridge"
+            ],
+
+            # Lodging & Travel
+            "Lodging & Travel": [
+                "hotel", "motel", "resort", "lodging", "travel agency", "accommodation"
+            ],
+
+            # Telecom
+            "Telecom": [
+                "telecom", "telecommunication", "mobile", "cellular", "cable", "satellite", "internet", "tv"
+            ],
+
+            # Home & Furnishings
+            "Home & Furnishings": [
+                "home", "furniture", "furnishings", "appliances", "hardware", "building materials", "lumber"
+            ],
+
+            # Auto Services
+            "Auto Services": [
+                "automotive", "car repair", "auto parts", "car wash", "towing", "garage", "mechanic"
+            ],
+
+            # Entertainment
+            "Entertainment": [
+                "entertainment", "movies", "games", "fun", "leisure", "lottery",
+                "casino", "theater", "amusement park", "sports", "recreation"
+            ],
+
+            # Electronics & Digital
+            "Electronics & Digital": [
+                "electronics", "computers", "gadgets", "peripherals", "digital goods",
+                "apps", "ebooks", "music store", "games online"
+            ],
+
+            # Professional Services
+            "Professional Services": [
+                "legal", "lawyer", "attorney", "accounting", "bookkeeping",
+                "tax preparation", "consulting", "security services"
+            ]
+        }
+
+        
+        found_categories = []
+        for category, patterns in category_patterns.items():
+            if any(pattern in query_lower for pattern in patterns):
+                found_categories.append(category)
+        
+        return found_categories
+    
+
+    def _enhanced_fallback_budget_classification(self, user_query: str) -> Dict[str, Any]:
+        """Enhanced fallback budget classification with comprehensive keyword detection"""
+
+        query_lower = user_query.lower()
+
+        # Enhanced keyword sets for better detection
+        creation_keywords = ["create", "set up", "new budget", "budget for", "allocate", "make a budget", "establish", "start"]
+        update_keywords = ["update", "change", "modify", "adjust", "edit", "revise", "alter", "increase", "decrease"]
+        delete_keywords = ["delete", "remove", "cancel", "stop", "eliminate", "get rid of", "drop", "end"]
+        list_keywords = ["show", "list", "display", "what are", "all budgets", "my budgets", "current budgets", "view"]
+        tracking_keywords = ["how am i doing", "budget performance", "vs budget", "overspend", "tracking", "progress", "status"]
+        optimization_keywords = ["save money", "cut spending", "optimize", "improve budget", "better", "efficient"]
+
+
+        category_patterns = {
+            # Groceries
+            "Groceries": [
+                "grocery", "groceries", "food shopping", "supermarket", "food stores"
+            ],
+
+            # Restaurants
+            "Restaurants": [
+                "restaurant", "restaurants", "dining", "eating out", "takeout", "fast food"
+            ],
+
+            # Bars & Alcohol
+            "Bars & Alcohol": [
+                "bars", "bar", "drinks", "alcohol", "nightlife", "liquor", "beer", "wine"
+            ],
+
+            # Utilities
+            "Utilities": [
+                "utilities", "utility", "electric", "electricity", "water", "heating", "gas", "sanitary"
+            ],
+
+            # Insurance
+            "Insurance": [
+                "insurance", "underwriting", "policy", "coverage", "premium"
+            ],
+
+            # Financial Services
+            "Financial Services": [
+                "money transfer", "remittance", "wire transfer", "banking service"
+            ],
+
+            # Shopping / Retail
+            "Wholesale & Retail": [
+                "shopping", "clothes", "clothing", "retail", "wholesale", "discount store", "department store"
+            ],
+
+            # Clothing & Apparel
+            "Clothing & Apparel": [
+                "clothing", "clothes", "apparel", "fashion", "shoe", "wear", "garments"
+            ],
+
+            # Pharmacy
+            "Pharmacy": [
+                "pharmacy", "medicine", "drugs", "prescriptions", "drugstore"
+            ],
+
+            # Healthcare
+            "Healthcare": [
+                "healthcare", "health", "medical", "doctor", "dentist", "hospital",
+                "optical", "chiropractor", "clinic", "podiatrist"
+            ],
+
+            # Transportation
+            "Transportation": [
+                "transportation", "transport", "travel", "commute", "taxi", "bus",
+                "train", "rail", "airline", "flight", "cruise", "freight", "toll", "bridge"
+            ],
+
+            # Lodging & Travel
+            "Lodging & Travel": [
+                "hotel", "motel", "resort", "lodging", "travel agency", "accommodation"
+            ],
+
+            # Telecom
+            "Telecom": [
+                "telecom", "telecommunication", "mobile", "cellular", "cable", "satellite", "internet", "tv"
+            ],
+
+            # Home & Furnishings
+            "Home & Furnishings": [
+                "home", "furniture", "furnishings", "appliances", "hardware", "building materials", "lumber"
+            ],
+
+            # Auto Services
+            "Auto Services": [
+                "automotive", "car repair", "auto parts", "car wash", "towing", "garage", "mechanic"
+            ],
+
+            # Entertainment
+            "Entertainment": [
+                "entertainment", "movies", "games", "fun", "leisure", "lottery",
+                "casino", "theater", "amusement park", "sports", "recreation"
+            ],
+
+            # Electronics & Digital
+            "Electronics & Digital": [
+                "electronics", "computers", "gadgets", "peripherals", "digital goods",
+                "apps", "ebooks", "music store", "games online"
+            ],
+
+            # Professional Services
+            "Professional Services": [
+                "legal", "lawyer", "attorney", "accounting", "bookkeeping",
+                "tax preparation", "consulting", "security services"
+            ]
+        }
+
+        
+
+        
+        # Extract mentioned categories
+        target_categories = []
+        for category, patterns in category_patterns.items():
+            if any(pattern in query_lower for pattern in patterns):
+                target_categories.append(category.title())
+        
+        # Determine operation type and analysis type
+        if any(keyword in query_lower for keyword in delete_keywords):
+            analysis_type = "budget_deletion"
+            operation_type = "delete"
+            query_focus = "budget_deletion"
+            requires_budget_update = False  # FIXED: Delete doesn't update, it deletes
+            requires_budget_deletion = True  # FIXED: This should be True
+            requires_budget_data = True
+            requires_transaction_data = False
+            
+        elif any(keyword in query_lower for keyword in list_keywords):
+            analysis_type = "budget_listing"
+            operation_type = "list"
+            query_focus = "budget_display"
+            requires_budget_update = False
+            requires_budget_deletion = False
+            requires_budget_data = True
+            requires_transaction_data = False
+            
+        elif any(keyword in query_lower for keyword in update_keywords):
+            analysis_type = "budget_update"
+            operation_type = "update"
+            query_focus = "budget_modification"
+            requires_budget_update = True
+            requires_budget_deletion = False
+            requires_budget_data = True
+            requires_transaction_data = False
+            
+        elif any(keyword in query_lower for keyword in creation_keywords):
+            analysis_type = "budget_creation"
+            operation_type = "create"
+            query_focus = "budget_setup"
+            requires_budget_update = True
+            requires_budget_deletion = False
+            requires_budget_data = False
+            requires_transaction_data = False
+            
+        elif any(keyword in query_lower for keyword in tracking_keywords):
+            analysis_type = "budget_tracking"
+            operation_type = "track"
+            query_focus = "performance_review"
+            requires_budget_update = False
+            requires_budget_deletion = False
+            requires_budget_data = True
+            requires_transaction_data = True
+            
+        elif any(keyword in query_lower for keyword in optimization_keywords):
+            analysis_type = "budget_optimization"
+            operation_type = "analyze"
+            query_focus = "optimization"
+            requires_budget_update = False
+            requires_budget_deletion = False
+            requires_budget_data = True
+            requires_transaction_data = True
+            
+        else:
+            # Default to tracking if we can't determine
+            analysis_type = "budget_tracking"
+            operation_type = "track"
+            query_focus = "performance_review"
+            requires_budget_update = False
+            requires_budget_deletion = False
+            requires_budget_data = True
+            requires_transaction_data = True
+
+        # Time period detection
+        if "this month" in query_lower or "current" in query_lower:
+            time_period = "current_month"
+        elif "last month" in query_lower:
+            time_period = "last_month"
+        else:
+            time_period = "current_month"
+
+        # Confidence based on keyword matches
+        confidence = 0.9 if any(keyword in query_lower for keyword in 
+                            creation_keywords + update_keywords + delete_keywords + list_keywords) else 0.7
+
+        return {
+            "analysis_type": analysis_type,
+            "requires_budget_data": requires_budget_data,
+            "requires_transaction_data": requires_transaction_data,
+            "requires_budget_update": requires_budget_update,
+            "requires_budget_deletion": requires_budget_deletion,  # FIXED: Added this field
+            "query_focus": query_focus,
+            "target_categories": target_categories,
+            "operation_type": operation_type,
+            "time_period": time_period,
+            "confidence": confidence,
+        }
+        
+
+
+    
+
     def _extract_budget_creation_params(self, user_query: str) -> Optional[Dict[str, Any]]: #(to be changed)
         """Extract budget creation parameters from user query"""
         
@@ -377,12 +747,12 @@ Analyze this budget query and provide structured classification:""",
         amount_match = re.search(r'\$?(\d+(?:,\d{3})*(?:\.\d{2})?)', user_query)
         
         # Look for categories
-        categories = ["groceries", "restaurants", "gas", "utilities", "entertainment", 
-                     "shopping", "transportation", "healthcare", "bars", "pharmacy"]
+        categories = ["groceries", "restaurants", "Utilities", "Insurance", "entertainment", "Wholesale & Retail", "Telcom", "Transportation", "Pharmacy & Healthcare", "Bars & Alcohol", 
+                      "Professional Services", "Electronics & Digital", "Auto Services", "Home & Furnishings" ]
         
         found_category = None
         for category in categories:
-            if category in query_lower:
+            if category.lower() in query_lower:
                 found_category = category.title()
                 break
         
@@ -396,23 +766,25 @@ Analyze this budget query and provide structured classification:""",
             }
         
         return None
+    
+
 
     def _budget_executor_node(self, state: BudgetAgentState) -> BudgetAgentState:
-        """Execute budget queries and operations"""
+        """Enhanced budget executor with support for all operations."""
 
         try:
-            print("⚡ [DEBUG] (Budget Executor Node) Executing budget queries and operations...")
+            print("[DEBUG] (Budget Executor Node) Executing budget queries and operations...")
 
             raw_data = []
             
-            # Execute SQL queries first
+            # Execute SQL queries first (spending analysis for context)
             sql_queries = state.get("sql_queries", [])
             for i, query_info in enumerate(sql_queries):
                 if "sql_query" not in query_info:
                     continue
 
                 try:
-                    print(f" Executing query {i+1}: {query_info.get('query_type', 'unknown')}")
+                    print(f"  Executing query {i+1}: {query_info.get('query_type', 'unknown')}")
 
                     execution_result = execute_generated_sql.invoke(
                         {
@@ -422,7 +794,7 @@ Analyze this budget query and provide structured classification:""",
                     )
 
                     if "error" in execution_result:
-                        print(f" ❌ Query {i+1} failed: {execution_result['error']}")
+                        print(f"  ❌ Query {i+1} failed: {execution_result['error']}")
                         continue
 
                     raw_data.append(
@@ -437,43 +809,69 @@ Analyze this budget query and provide structured classification:""",
                         }
                     )
 
-                    print(f" ✅ Query {i+1} success: {execution_result.get('row_count', 0)} rows")
+                    print(f"  ✅ Query {i+1} success: {execution_result.get('row_count', 0)} rows")
 
                 except Exception as query_error:
-                    print(f" ❌ Query {i+1} execution error: {query_error}")
+                    print(f"  ❌ Query {i+1} execution error: {query_error}")
 
-            # Execute budget operations
+            # Execute budget operations with enhanced support
             budget_operations = state.get("budget_operations", [])
             for i, operation in enumerate(budget_operations):
                 try:
-                    if operation.get("operation_type") == "create_budget":
-                        print(f" Executing budget operation {i+1}: Create budget")
-                        
+                    operation_type = operation.get("operation_type", "")
+                    client_id = state["client_id"]
+                    
+                    print(f"  Executing budget operation {i+1}: {operation_type}")
+                    
+                    # FIXED: Handle the operation types that your analyzer actually generates
+                    if operation_type in ["create_or_update_budget", "create_budget", "update_budget"]:
                         result = create_or_update_budget.invoke(
                             {
-                                "client_id": state["client_id"],
+                                "client_id": client_id,
                                 "category": operation["category"],
                                 "monthly_limit": operation["monthly_limit"],
                                 "budget_type": operation.get("budget_type", "fixed"),
                             }
                         )
-
-                        raw_data.append(
+                        
+                    elif operation_type == "delete_budget":
+                        result = delete_budget.invoke(
                             {
-                                "query_type": "budget_operation",
-                                "operation_type": "create_budget",
-                                "results": [result],
-                                "column_names": ["operation_result"],
-                                "row_count": 1,
+                                "client_id": client_id,
+                                "category": operation["category"]
                             }
                         )
+                        
+                    elif operation_type == "list_budgets":
+                        result = list_all_budgets.invoke(
+                            {
+                                "client_id": client_id
+                            }
+                        )
+                        
+                    else:
+                        print(f"  ⚠️ Unknown operation type: {operation_type}")
+                        continue
 
-                        print(f" ✅ Budget operation {i+1}: {result.get('message', 'Completed')}")
+                    raw_data.append(
+                        {
+                            "query_type": "budget_operation",
+                            "operation_type": operation_type,
+                            "results": [result],
+                            "column_names": ["operation_result"],
+                            "row_count": 1,
+                        }
+                    )
+
+                    if result.get("success", False):
+                        print(f"  ✅ Budget operation {i+1}: {result.get('message', 'Completed')}")
+                    else:
+                        print(f"  ❌ Budget operation {i+1} failed: {result.get('error', 'Unknown error')}")
 
                 except Exception as op_error:
-                    print(f" ❌ Budget operation {i+1} error: {op_error}")
+                    print(f"  ❌ Budget operation {i+1} error: {op_error}")
 
-            # Update budget tracking for current month if we have budget data
+            # Update budget tracking for current month if we have active operations
             current_month = datetime.now().strftime("%Y-%m")
             try:
                 tracking_result = update_budget_tracking_for_month.invoke(
@@ -484,7 +882,7 @@ Analyze this budget query and provide structured classification:""",
                 )
                 
                 if tracking_result.get("success"):
-                    print(f" ✅ Budget tracking updated for {current_month}")
+                    print(f"  ✅ Budget tracking updated for {current_month}")
                     raw_data.append(
                         {
                             "query_type": "budget_tracking_update",
@@ -495,7 +893,7 @@ Analyze this budget query and provide structured classification:""",
                     )
 
             except Exception as tracking_error:
-                print(f" ⚠️ Budget tracking update failed: {tracking_error}")
+                print(f"  ⚠️ Budget tracking update failed: {tracking_error}")
 
             state["raw_data"] = raw_data
             state["execution_path"].append("budget_executor")
@@ -515,7 +913,7 @@ Analyze this budget query and provide structured classification:""",
             [
                 (
                     "system",
-                    """You are a helpful personal bank's budget advisor analyzing the user's financial data.
+                    """You are a helpful personal GX bank's budget advisor analyzing the user's financial data.
 
 The user asked: "{user_query}"
 
@@ -532,6 +930,7 @@ You have access to their real budget and spending data. Your job is to:
 - Use natural, conversational language
 - Give specific recommendations when possible
 - Act as an emplyee of bank
+- If the user just only wanted to Update, Delete or Add answer that you completed the operation
 - Highlight both successes and areas for improvement
 - Never mention technical details like "SQL" or "database"
 
@@ -737,9 +1136,7 @@ def test_budget_agent():
         
         test_queries = [
             "Create a $800 budget for groceries",
-            "How am I doing against my budget last month?",
-            "Where am I overspending?",
-            "Set up a $300 budget for restaurants"
+            "Delete my budget for gorceries"
         ]
 
 

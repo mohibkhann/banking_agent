@@ -120,13 +120,11 @@ class RAGAgent:
         overall_csv_path: Optional[str] = None,
         model_name: str = "gpt-4o",
         memory: bool = True,
-        # NEW: Accept agent instances for collaboration
         spending_agent: Optional[Any] = None,
         budget_agent: Optional[Any] = None,
     ):
         print(f"🔍 Initializing Enhanced RAG Agent with real collaboration...")
         
-        # Initialize DataStore only if CSV paths provided (for collaboration)
         if client_csv_path and overall_csv_path:
             print(f"📋 Client data: {client_csv_path}")
             print(f"📊 Overall data: {overall_csv_path}")
