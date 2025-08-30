@@ -119,13 +119,12 @@ class BudgetAgent:
             client_csv_path=client_csv_path, overall_csv_path=overall_csv_path
         )
 
-        # Initialize LLM
-        self.llm = ChatOpenAI(
-                    model="gpt-4o",   
-                    temperature=0,
-                    openai_api_key=os.getenv("OPENAI_API_KEY"),
+        self.llm = AzureChatOpenAI(
+                        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+                        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+                        temperature=0,
                     )
-                        
+
 
 
         # Set up structured output parser

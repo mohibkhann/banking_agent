@@ -6,7 +6,7 @@ import requests
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from pydantic import BaseModel, Field, validator
 
 load_dotenv()
@@ -34,7 +34,7 @@ class TavilySearchRequest(BaseModel):
         description="Domains to exclude from search"
     )
     max_results: int = Field(
-        default=5,
+        default=6,
         ge=1,
         le=20,
         description="Maximum number of results to return"
@@ -326,6 +326,7 @@ Generate queries that will return:
 1. Product features and benefits
 2. Rates, fees, and requirements
 3. Comparison information when relevant
+4. Price of the product user is considering to buy or explore
 
 Return JSON with:
 - primary_query: Main search query
@@ -339,7 +340,11 @@ Generate optimized search queries for this banking inquiry.""")
     ])
     
     try:
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.3)
+        llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+            temperature=0,
+        )   
         response = llm.invoke(
             prompt.format_messages(
                 templates=json.dumps(templates, indent=2),

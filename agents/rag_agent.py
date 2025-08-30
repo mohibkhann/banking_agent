@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
@@ -140,9 +140,15 @@ class RAGAgent:
         self.spending_agent = spending_agent
         self.budget_agent = budget_agent
 
-        # Initialize LLM
-        self.llm = ChatOpenAI(model=model_name, temperature=0)
+        self.llm = AzureChatOpenAI(
+                        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+                        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+                        temperature=0,
+                    )
 
+
+      
+       
         # Set up structured output parser
         self.intent_parser = PydanticOutputParser(
             pydantic_object=RAGIntentClassification

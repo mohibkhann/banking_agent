@@ -212,16 +212,12 @@ def generate_sql_for_client_analysis(
             ])
 
     try:
-        # llm = AzureChatOpenAI(
-        #     azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
-        #     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
-        #     temperature=0,
-        # )   
-        llm = ChatOpenAI(
-            model="gpt-4o-mini",   
+        llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
             temperature=0,
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
-            )     
+        )   
+   
         resp = llm.invoke(prompt.format_messages(user_query=user_query))
         
         if not resp or not resp.content:
@@ -422,18 +418,13 @@ Generate ONLY the SQL query for:
     ])
 
     try:
-        # llm = AzureChatOpenAI(
-        #     azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
-        #     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
-        #     temperature=0,
-        # )  
-
-        llm = ChatOpenAI(
-            model="gpt-4o-mini",   
+        llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
             temperature=0,
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
-            )
-                           
+        )  
+
+         
         resp = llm.invoke(prompt.format_messages(user_query=user_query))
         
         if not resp or not resp.content:
@@ -570,17 +561,17 @@ Generate ONLY the SQL query for:
     ])
 
     try:
-        # llm = AzureChatOpenAI(
-        #     azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
-        #     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
-        #     temperature=0,
-        # )   
-        # 
-        llm = ChatOpenAI(
-    model="gpt-4o-mini",   
-    temperature=0,
-    openai_api_key=os.getenv("OPENAI_API_KEY"),
-    )   
+        llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), 
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
+            temperature=0,
+        )   
+        
+    #     llm = ChatOpenAI(
+    # model="gpt-4o-mini",   
+    # temperature=0,
+    # openai_api_key=os.getenv("OPENAI_API_KEY"),
+    # )   
         resp = llm.invoke(prompt.format_messages(user_query=user_query))
         print(f"This is LLM {resp.content}")
         
