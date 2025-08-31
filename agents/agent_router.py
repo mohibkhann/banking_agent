@@ -60,6 +60,35 @@ class AgentRouting(BaseModel):
     )
 
 
+# NEW: Enhanced Follow-up Routing Model
+class FollowUpRouting(BaseModel):
+    """Enhanced routing decision for follow-up questions that can invoke other agents"""
+    
+    requires_agent_execution: bool = Field(
+        description="True if follow-up needs to execute another agent, False for conversational response only"
+    )
+    target_agent: Optional[Literal["spending", "budget", "rag"]] = Field(
+        default=None,
+        description="Which agent to execute if requires_agent_execution is True"
+    )
+    enhanced_query: Optional[str] = Field(
+        default=None,
+        description="Enhanced query to send to target agent if agent execution is needed"
+    )
+    context_integration_needed: bool = Field(
+        description="Whether previous conversation context needs to be integrated into the new query"
+    )
+    response_strategy: Literal["conversational", "agent_execution", "hybrid"] = Field(
+        description="Strategy: 'conversational' for chat response, 'agent_execution' for agent call, 'hybrid' for both"
+    )
+    confidence: float = Field(
+        description="Routing confidence", ge=0.0, le=1.0
+    )
+    reasoning: str = Field(
+        description="Explanation of why this routing decision was made"
+    )
+
+
 @dataclass
 class ConversationContext:
     """Conversation context for memory management"""
@@ -83,6 +112,7 @@ class MultiAgentState(TypedDict):
     user_query: str
     conversation_context: Optional[ConversationContext]
     routing_decision: Optional[Dict[str, Any]]
+    follow_up_routing: Optional[Dict[str, Any]]  # NEW: For follow-up routing decisions
     primary_response: Optional[str]
     secondary_response: Optional[str]
     final_response: str
@@ -98,7 +128,7 @@ class MultiAgentState(TypedDict):
 
 class EnhancedPersonalFinanceRouter:
     """
-    
+    Enhanced router with smart follow-up capabilities that can invoke other agents
     """
 
     def __init__(
@@ -136,35 +166,31 @@ class EnhancedPersonalFinanceRouter:
                         api_version=os.getenv("AZURE_OPENAI_API_VERSION"),            
                         temperature=0,
                     )
-
-
-        # self.llm = ChatOpenAI(
-        #             model="gpt-4o-mini",   
-        #             temperature=0,
-        #             openai_api_key=os.getenv("OPENAI_API_KEY"),
-        #             )
                         
         # Set up routing parser
         self.routing_parser = PydanticOutputParser(pydantic_object=AgentRouting)
+        
+        # NEW: Set up follow-up routing parser
+        self.followup_parser = PydanticOutputParser(pydantic_object=FollowUpRouting)
 
         # Conversation contexts (in-memory cache)
         self.contexts: Dict[str, ConversationContext] = {}
 
-        # Build router graph
+        # Build enhanced router graph
         self.graph = self._build_router_graph()
 
     def _build_router_graph(self) -> StateGraph:
-        """Build router with follow-up node that can route to irrelevant"""
+        """Build enhanced router with smart follow-up routing capabilities"""
 
         workflow = StateGraph(MultiAgentState)
 
-        # Router workflow nodes
+        # Enhanced router workflow nodes
         workflow.add_node("context_manager", self._context_manager_node)
         workflow.add_node("query_router", self._query_router_node)
         workflow.add_node("spending_agent_node", self._spending_agent_node)
         workflow.add_node("budget_agent_node", self._budget_agent_node)
         workflow.add_node("rag_agent_node", self._rag_agent_node)
-        workflow.add_node("follow_up_handler", self._follow_up_handler_node)  
+        workflow.add_node("follow_up_handler", self._follow_up_handler_node)  # Enhanced
         workflow.add_node("irrelevant_handler", self._irrelevant_handler_node)
         workflow.add_node("response_synthesizer", self._response_synthesizer_node)
         workflow.add_node("memory_updater", self._memory_updater_node)
@@ -173,7 +199,7 @@ class EnhancedPersonalFinanceRouter:
         # Entry point
         workflow.set_entry_point("context_manager")
 
-        # Enhanced routing logic
+        # Enhanced routing logic with smart follow-up routing
         workflow.add_edge("context_manager", "query_router")
         workflow.add_conditional_edges(
             "query_router",
@@ -193,12 +219,16 @@ class EnhancedPersonalFinanceRouter:
         workflow.add_edge("rag_agent_node", "response_synthesizer")
         workflow.add_edge("irrelevant_handler", "response_synthesizer")
         
+        # NEW: Enhanced follow-up routing with agent execution capability
         workflow.add_conditional_edges(
             "follow_up_handler",
             self._route_from_follow_up,
             {
                 "synthesize": "response_synthesizer",
-                "irrelevant": "irrelevant_handler"
+                "irrelevant": "irrelevant_handler",
+                "spending": "spending_agent_node",  # NEW: Can route to spending agent
+                "budget": "budget_agent_node",     # NEW: Can route to budget agent  
+                "rag": "rag_agent_node"            # NEW: Can route to RAG agent
             }
         )
         
@@ -209,19 +239,26 @@ class EnhancedPersonalFinanceRouter:
         return workflow.compile(checkpointer=None)
 
     def _route_from_follow_up(self, state: MultiAgentState) -> str:
-        """Route from follow-up handler - either to synthesizer or irrelevant"""
+        """Enhanced routing from follow-up handler - can now route to agents"""
+        follow_up_routing = state.get("follow_up_routing", {})
+        
+        # Check if follow-up determined we need agent execution
+        if follow_up_routing.get("requires_agent_execution"):
+            target_agent = follow_up_routing.get("target_agent")
+            if target_agent in ["spending", "budget", "rag"]:
+                print(f"[DEBUG] 🔀 Follow-up routing to {target_agent} agent")
+                return target_agent
+        
+        # Check fallback routing for irrelevant
         routing_decision = state.get("routing_decision", {})
         if routing_decision.get("primary_agent") == "irrelevant":
             return "irrelevant"
         
+        # Default to synthesize if we have a response
         if state.get("primary_response"):
             return "synthesize"
         
         return "irrelevant"
-
-
-
-
 
     def _context_manager_node(self, state: MultiAgentState) -> MultiAgentState:
         """Enhanced conversation context and memory management"""
@@ -355,11 +392,6 @@ class EnhancedPersonalFinanceRouter:
 
         return "\n".join(context_parts)
     
-
-    
-    
-
-    
     def _has_sufficient_follow_up_context(self, context, query: str) -> bool:
         """Determine if we have sufficient context to handle a follow-up question"""
         
@@ -385,9 +417,6 @@ class EnhancedPersonalFinanceRouter:
         
         return True
 
-            
-
-
     def _query_router_node(self, state: MultiAgentState) -> MultiAgentState:
         """Enhanced LLM-based routing with comprehensive context analysis"""
 
@@ -402,7 +431,7 @@ class EnhancedPersonalFinanceRouter:
             # Build comprehensive context for LLM
             rich_context = self._build_comprehensive_context(context)
 
-            # Enhanced routing prompt
+            # Enhanced routing prompt (same as before)
             routing_prompt = ChatPromptTemplate.from_messages([
                 (
                     "system",
@@ -666,7 +695,7 @@ class EnhancedPersonalFinanceRouter:
             return {
                 "is_relevant": route != "irrelevant",
                 "primary_agent": route,
-                "query_category": f"enhanced_{route}",  # FIX: Remove "ultra_rich"
+                "query_category": f"enhanced_{route}",
                 "confidence": confidence,
                 "reasoning": reasoning,
                 "context_weight": context_weight
@@ -683,10 +712,10 @@ class EnhancedPersonalFinanceRouter:
             }
 
     def _follow_up_handler_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Enhanced follow-up handler with intelligent irrelevant routing"""
+        """ENHANCED: Follow-up handler with smart agent routing capabilities"""
         
         try:
-            print("[DEBUG] Executing enhanced follow-up handler...")
+            print("[DEBUG] 🔄 Executing ENHANCED follow-up handler with agent routing...")
             
             context = state.get("conversation_context")
             user_query = state["user_query"]
@@ -695,7 +724,6 @@ class EnhancedPersonalFinanceRouter:
             if not self._has_sufficient_follow_up_context(context, user_query):
                 print("[DEBUG] Insufficient context for follow-up, routing to irrelevant handler")
                 
-                # Set routing to irrelevant and let the irrelevant handler take over
                 state["routing_decision"] = {
                     "is_relevant": False,
                     "primary_agent": "irrelevant",
@@ -704,70 +732,165 @@ class EnhancedPersonalFinanceRouter:
                     "reasoning": "Follow-up detected but insufficient conversation context - treating as out of scope"
                 }
                 state["execution_path"].append("follow_up_handler_context_insufficient")
-                
-                # Don't set primary_response - let irrelevant_handler handle it
                 return state
             
-            # Build comprehensive context for follow-up handling
-            comprehensive_followup_context = self._build_comprehensive_followup_context(context, user_query)
-
-            print(f"[PRINT LOGS] This is the follow up context {comprehensive_followup_context}")
+            # NEW: Smart Follow-up Routing Analysis
+            comprehensive_context = self._build_comprehensive_followup_context(context, user_query)
             
-            # Enhanced follow-up handling prompt
-            follow_up_prompt = ChatPromptTemplate.from_messages([
-                ("system", f"""You are a professional GX Bank financial assistant with access to the complete conversation history and context. A customer is asking a follow-up question about a previous financial discussion.
+            # Enhanced follow-up routing prompt
+            followup_routing_prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are an advanced follow-up routing specialist for GX Bank's AI assistant. Your job is to determine if a follow-up question requires executing another agent or can be handled conversationally.
 
-    **YOUR EXPERTISE:**
-    - Deep contextual understanding of financial conversations
-    - Access to previous analysis, data points, and methodology
-    - Ability to provide specific, detailed answers based on conversation history
-    - Professional banking communication style
+**COMPREHENSIVE CONVERSATION CONTEXT:**
+{comprehensive_context}
 
-    **COMPREHENSIVE CONVERSATION CONTEXT:**
-    {comprehensive_followup_context}
+**YOUR MISSION:**
+Analyze the follow-up question and determine the optimal handling strategy:
 
-    **YOUR MISSION:**
-    Provide a detailed, specific, and helpful answer to the customer's follow-up question using ALL available context from the previous conversation. You should:
+🎯 **ROUTING DECISION OPTIONS:**
 
-    - Answer with Specific Details: Use actual data, timeframes, calculations, or methodology from previous conversation
-    - Reference Previous Discussion: Naturally reference what was discussed before
-    - Provide Complete Information: Don't be vague - give specific, actionable details
-    - Maintain Professional Tone: Sound like a knowledgeable GX Bank representative
-    - Build on Previous Analysis: Extend or clarify previous financial analysis
-    - Use Conversation Flow: Acknowledge the ongoing nature of the discussion
+1. **CONVERSATIONAL RESPONSE** - Handle with conversation only when:
+   - User asks for clarification on previous response ("what did you mean by X?")
+   - Asking about methodology/calculation details that can be explained ("how did you calculate that?")
+   - Simple follow-up questions that reference previous data ("which months were those?")
+   - Requesting more details about already-provided information
 
-    **RESPONSE STYLE:**
-    - Professional but conversational tone
-    - Specific details from previous conversation
-    - Direct answers to methodology, timeframe, or calculation questions
-    - Natural acknowledgment of conversation continuity
-    - Helpful and informative banking advisor voice
+2. **AGENT EXECUTION** - Execute another agent when:
+   - User requests NEW analysis based on previous discussion ("based on my spending, create a budget")
+   - Cross-domain requests ("given those credit cards, which fits my spending pattern?")
+   - Requests that need fresh data processing ("now show me budget vs that spending")
+   - Complex queries combining previous context with new analysis needs
 
-    **CRITICAL INSTRUCTIONS:**
-    - Never say "I don't have access" - you have full context
-    - Never deflect - answer the specific follow-up question directly
-    - Use the rich context to provide detailed, specific answers
-    - Reference previous numbers, dates, analysis methods naturally"""),
-                ("human", f"""The customer's follow-up question is: "{user_query}"
+3. **HYBRID APPROACH** - Both conversational + agent execution when:
+   - User wants explanation AND new analysis
+   - Complex requests needing context integration
 
-    Using the comprehensive conversation context provided, give a detailed and specific answer to their follow-up question.""")
+**AGENT SELECTION RULES:**
+- **spending** agent: For transaction analysis, spending patterns, category breakdowns
+- **budget** agent: For budget creation, budget analysis, overspending checks
+- **rag** agent: For banking products, external services, policy questions
+
+**CONTEXT INTEGRATION:**
+- If agent execution needed, enhance the query with conversation context
+- Build queries that reference previous findings naturally
+- Ensure new analysis builds on previous discussion
+
+**CRITICAL EXAMPLES:**
+
+Follow-up: "Based on the credit cards you showed me, which one suits my spending pattern?"
+→ requires_agent_execution: TRUE, target_agent: "rag", enhanced_query: "Based on my spending patterns, recommend the most suitable credit card from GX Bank's offerings"
+
+Follow-up: "Now create a budget based on that spending analysis"
+→ requires_agent_execution: TRUE, target_agent: "budget", enhanced_query: "Create a monthly budget based on my recent spending patterns and categories"
+
+Follow-up: "What did you mean by overspending in restaurants?"
+→ requires_agent_execution: FALSE, response_strategy: "conversational"
+
+Follow-up: "Which months did you use for that calculation?"
+→ requires_agent_execution: FALSE, response_strategy: "conversational"
+
+**FORMAT INSTRUCTIONS:**
+{format_instructions}
+
+Analyze the follow-up question and provide structured routing decision:"""),
+                ("human", f"""Current follow-up question: "{user_query}"
+
+Based on the comprehensive conversation context, determine the optimal handling strategy for this follow-up question.""")
             ])
             
-            response = self.llm.invoke(
-                follow_up_prompt.format_messages(
-                    user_query=user_query,
-                    comprehensive_followup_context=comprehensive_followup_context
-                )
+            formatted_followup_prompt = followup_routing_prompt.partial(
+                format_instructions=self.followup_parser.get_format_instructions(),
+                comprehensive_context=comprehensive_context
             )
             
-            state["primary_response"] = response.content
-            state["execution_path"].append("follow_up_handler")
-            
-            # Update context
-            if context:
-                context.last_agent_used = "follow_up"
-            
-            print("[DEBUG] Enhanced follow-up handler completed successfully")
+            try:
+                followup_chain = formatted_followup_prompt | self.llm | self.followup_parser
+                followup_routing = followup_chain.invoke({"user_query": user_query})
+                followup_routing_dict = followup_routing.model_dump()
+                
+                print(f"[DEBUG] 🎯 Follow-up routing: {followup_routing_dict['response_strategy']}")
+                print(f"[DEBUG] 🔧 Requires agent execution: {followup_routing_dict['requires_agent_execution']}")
+                if followup_routing_dict.get('target_agent'):
+                    print(f"[DEBUG] 🎯 Target agent: {followup_routing_dict['target_agent']}")
+                
+                state["follow_up_routing"] = followup_routing_dict
+                
+                # If agent execution is required, set up enhanced query and routing
+                if followup_routing_dict["requires_agent_execution"]:
+                    target_agent = followup_routing_dict.get("target_agent")
+                    enhanced_query = followup_routing_dict.get("enhanced_query")
+                    
+                    if target_agent and enhanced_query:
+                        # Prepare for agent execution
+                        state["enhanced_query"] = enhanced_query
+                        state["user_query"] = enhanced_query  # Override with enhanced query
+                        
+                        # Update routing decision to point to target agent
+                        state["routing_decision"] = {
+                            "is_relevant": True,
+                            "primary_agent": target_agent,
+                            "query_category": f"follow_up_to_{target_agent}",
+                            "confidence": 0.95,
+                            "reasoning": f"Follow-up question requires {target_agent} agent execution with enhanced query"
+                        }
+                        
+                        print(f"[DEBUG] ✅ Enhanced follow-up will execute {target_agent} agent with query: {enhanced_query[:60]}...")
+                        state["execution_path"].append("follow_up_handler_agent_routing")
+                        return state
+                
+                # Handle conversational response
+                if followup_routing_dict["response_strategy"] in ["conversational", "hybrid"]:
+                    # Generate conversational response using context
+                    conversational_prompt = ChatPromptTemplate.from_messages([
+                        ("system", f"""You are a professional GX Bank financial assistant with access to the complete conversation history. A customer is asking a follow-up question.
+
+**COMPREHENSIVE CONVERSATION CONTEXT:**
+{comprehensive_context}
+
+**YOUR MISSION:**
+Provide a detailed, specific, and helpful conversational answer to the customer's follow-up question using ALL available context from the previous conversation. You should:
+
+- Answer with Specific Details: Use actual data, timeframes, calculations, or methodology from previous conversation
+- Reference Previous Discussion: Naturally reference what was discussed before  
+- Provide Complete Information: Don't be vague - give specific, actionable details
+- Maintain Professional Tone: Sound like a knowledgeable GX Bank representative
+- Build on Previous Analysis: Extend or clarify previous financial analysis
+- Use Conversation Flow: Acknowledge the ongoing nature of the discussion
+
+**RESPONSE STYLE:**
+- Professional but conversational tone
+- Specific details from previous conversation
+- Direct answers to methodology, timeframe, or calculation questions
+- Natural acknowledgment of conversation continuity
+- Helpful and informative banking advisor voice
+
+**CRITICAL INSTRUCTIONS:**
+- Never say "I don't have access" - you have full context
+- Never deflect - answer the specific follow-up question directly
+- Use the rich context to provide detailed, specific answers
+- Reference previous numbers, dates, analysis methods naturally"""),
+                        ("human", f"""The customer's follow-up question is: "{user_query}"
+
+Using the comprehensive conversation context provided, give a detailed and specific answer to their follow-up question.""")
+                    ])
+                    
+                    response = self.llm.invoke(
+                        conversational_prompt.format_messages(
+                            user_query=user_query,
+                            comprehensive_context=comprehensive_context
+                        )
+                    )
+                    
+                    state["primary_response"] = response.content
+                    state["execution_path"].append("follow_up_handler_conversational")
+                    
+                    print("[DEBUG] ✅ Generated conversational follow-up response")
+                    return state
+                    
+            except Exception as parse_error:
+                print(f"[DEBUG] Follow-up routing parsing failed: {parse_error}")
+                # Fallback to simple conversational response
+                return self._fallback_conversational_response(state, comprehensive_context)
             
         except Exception as e:
             print(f"[DEBUG] Enhanced follow-up handler error: {e}")
@@ -775,14 +898,51 @@ class EnhancedPersonalFinanceRouter:
             state["execution_path"].append("follow_up_handler_error")
         
         return state
-    
+
+    def _fallback_conversational_response(self, state: MultiAgentState, comprehensive_context: str) -> MultiAgentState:
+        """Fallback conversational response when routing parsing fails"""
+        
+        try:
+            user_query = state["user_query"]
+            
+            fallback_prompt = ChatPromptTemplate.from_messages([
+                ("system", f"""You are a GX Bank financial assistant handling a follow-up question. 
+
+**CONVERSATION CONTEXT:**
+{comprehensive_context}
+
+Provide a helpful response to the customer's follow-up question based on the conversation context available."""),
+                ("human", f"""Customer follow-up: "{user_query}"
+
+Please provide a helpful response based on our previous conversation.""")
+            ])
+            
+            response = self.llm.invoke(
+                fallback_prompt.format_messages(
+                    user_query=user_query,
+                    comprehensive_context=comprehensive_context
+                )
+            )
+            
+            state["primary_response"] = response.content
+            state["execution_path"].append("follow_up_handler_fallback_conversational")
+            
+            print("[DEBUG] ✅ Generated fallback conversational response")
+            
+        except Exception as e:
+            print(f"[DEBUG] Fallback conversational response failed: {e}")
+            state["primary_response"] = "I understand you're following up on our previous conversation. Could you please provide a bit more context so I can help you better?"
+            state["execution_path"].append("follow_up_handler_fallback_error")
+        
+        return state
 
     def _spending_agent_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Execute spending agent query"""
+        """Execute spending agent query (updated to handle enhanced queries from follow-ups)"""
 
         try:
             print("📊 [DEBUG] Executing spending agent query...")
 
+            # Check for enhanced query from follow-up handler
             original_query = state.get("user_query")
             enhanced_query = state.get("enhanced_query")
             query_to_process = enhanced_query if enhanced_query else original_query
@@ -792,6 +952,10 @@ class EnhancedPersonalFinanceRouter:
                 state["error"] = "No valid query provided to spending agent"
                 state["primary_response"] = "I couldn't process your query. Please try asking about your spending again."
                 return state
+            
+            # Log if we're processing an enhanced follow-up query
+            if enhanced_query:
+                print(f"[DEBUG] 🔄 Processing enhanced follow-up query: {enhanced_query[:60]}...")
             
             result = self.spending_agent.process_query(
                 client_id=state["client_id"],
@@ -816,11 +980,12 @@ class EnhancedPersonalFinanceRouter:
         return state
 
     def _budget_agent_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Execute budget agent query"""
+        """Execute budget agent query (updated to handle enhanced queries from follow-ups)"""
 
         try:
             print("💰 [DEBUG] Executing budget agent query...")
 
+            # Check for enhanced query from follow-up handler
             original_query = state.get("user_query")
             enhanced_query = state.get("enhanced_query")
             query_to_process = enhanced_query if enhanced_query else original_query
@@ -830,6 +995,10 @@ class EnhancedPersonalFinanceRouter:
                 state["error"] = "No valid query provided to budget agent"
                 state["primary_response"] = "I couldn't process your query. Please try asking about your budget again."
                 return state
+
+            # Log if we're processing an enhanced follow-up query
+            if enhanced_query:
+                print(f"[DEBUG] 🔄 Processing enhanced follow-up query: {enhanced_query[:60]}...")
 
             result = self.budget_agent.process_query(
                 client_id=state["client_id"],
@@ -853,11 +1022,12 @@ class EnhancedPersonalFinanceRouter:
         return state
 
     def _rag_agent_node(self, state: MultiAgentState) -> MultiAgentState:
-        """NEW: Execute RAG agent query with collaboration capabilities"""
+        """Execute RAG agent query (updated to handle enhanced queries from follow-ups)"""
 
         try:
             print("🔍 [DEBUG] Executing RAG agent query...")
 
+            # Check for enhanced query from follow-up handler
             original_query = state.get("user_query")
             enhanced_query = state.get("enhanced_query")
             query_to_process = enhanced_query if enhanced_query else original_query
@@ -867,6 +1037,10 @@ class EnhancedPersonalFinanceRouter:
                 state["error"] = "No valid query provided to RAG agent"
                 state["primary_response"] = "I couldn't process your query. Please try asking about banking products or services again."
                 return state
+
+            # Log if we're processing an enhanced follow-up query
+            if enhanced_query:
+                print(f"[DEBUG] 🔄 Processing enhanced follow-up query: {enhanced_query[:60]}...")
 
             # Execute RAG agent with collaboration capabilities
             result = self.rag_agent.process_query(
@@ -896,7 +1070,7 @@ class EnhancedPersonalFinanceRouter:
         return state
 
     def _response_synthesizer_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Enhanced response synthesis"""
+        """Enhanced response synthesis with follow-up awareness"""
 
         try:
             print("🔧 [DEBUG] Synthesizing final response...")
@@ -904,6 +1078,7 @@ class EnhancedPersonalFinanceRouter:
             primary_response = state.get("primary_response", "")
             context = state.get("conversation_context")
             routing = state.get("routing_decision", {})
+            follow_up_routing = state.get("follow_up_routing", {})
 
             if not primary_response:
                 if state.get("error"):
@@ -926,31 +1101,38 @@ class EnhancedPersonalFinanceRouter:
                 # RAG responses are already comprehensive, minimal processing needed
                 state["final_response"] = primary_response
             else:
-                # For spending/budget agents, add cross-agent suggestions
+                # For spending/budget agents and follow-ups, add contextual enhancements
                 prefix = ""
-                if context and context.message_count > 1:
+                
+                # Enhanced follow-up context integration
+                if follow_up_routing and follow_up_routing.get("requires_agent_execution"):
+                    target_agent = follow_up_routing.get("target_agent", agent_used)
+                    prefix = f"Building on our previous discussion, here's your {target_agent} analysis... "
+                elif context and context.message_count > 1:
                     if context.last_agent_used and context.last_agent_used != agent_used:
                         prefix = f"Switching to {agent_used} analysis... "
                 
                 state["final_response"] = prefix + primary_response
-                # record the model’s reply
+                
+                # Record the model's reply
                 if state.get("final_response"):
                     state["messages"].append(AIMessage(content=state["final_response"]))
-
-
                 
-                # Add intelligent cross-agent suggestions
+                # Add intelligent cross-agent suggestions (enhanced for follow-ups)
                 recent_topics = context.recent_topics if context else []
                 suggestion = ""
                 
+                # Smart suggestions based on current and previous context
                 if agent_used == "spending" and "banking" in recent_topics:
-                    suggestion = "\n\n💡 *I can also help you find banking products that match your spending patterns.*"
+                    suggestion = "\n\n💡 *Based on this spending analysis, would you like me to recommend suitable banking products?*"
                 elif agent_used == "budget" and "banking" in recent_topics:
-                    suggestion = "\n\n💡 *Based on your budget, I can help you find suitable banking products.*"
+                    suggestion = "\n\n💡 *I can help you find banking products that align with this budget.*"
                 elif agent_used == "spending" and "budget" not in recent_topics:
-                    suggestion = "\n\n💡 *Based on this spending analysis, would you like help creating or reviewing a budget?*"
+                    suggestion = "\n\n💡 *Would you like me to create a budget based on this spending analysis?*"
                 elif agent_used == "budget" and context and context.message_count <= 2:
                     suggestion = "\n\n🎯 *I can also analyze your historical spending patterns or help you explore banking products.*"
+                elif agent_used == "rag" and any(topic in recent_topics for topic in ["spending", "budget"]):
+                    suggestion = "\n\n💡 *Would you like me to analyze how this product fits with your spending patterns or budget?*"
                 
                 state["final_response"] += suggestion
 
@@ -964,18 +1146,29 @@ class EnhancedPersonalFinanceRouter:
         return state
 
     def _memory_updater_node(self, state: MultiAgentState) -> MultiAgentState:
-        """Update conversation memory"""
+        """Update conversation memory with enhanced follow-up tracking"""
 
         try:
             print("💾 [DEBUG] Updating conversation memory...")
 
             context = state.get("conversation_context")
             if context:
+                # Determine the actual query used (might be enhanced from follow-up)
+                query_used = state.get("enhanced_query") if state.get("enhanced_query") else context.last_user_query
+                
+                # Safely get routing decision
+                routing_decision = state.get("routing_decision", {})
+                agent_used = routing_decision.get("primary_agent") if routing_decision else "unknown"
+                
+                # Enhanced interaction record with follow-up metadata
                 current_interaction = {
                     "timestamp": datetime.now().isoformat(),
-                    "user_query": context.last_user_query,
+                    "user_query": context.last_user_query,  # Original user query
+                    "enhanced_query": state.get("enhanced_query"),  # Enhanced query if follow-up
                     "agent_response": state.get("final_response"),
-                    "agent_used": state.get("routing_decision", {}).get("primary_agent"),
+                    "agent_used": agent_used,
+                    "was_follow_up": state.get("is_follow_up", False),
+                    "follow_up_routing": state.get("follow_up_routing"),
                     "success": state.get("error") is None
                 }
                 
@@ -983,78 +1176,52 @@ class EnhancedPersonalFinanceRouter:
                 context.last_agent_response = state.get("final_response")
                 context.conversation_history = context.conversation_history[-10:]
                 
+                # Enhanced conversation summary with follow-up awareness
                 if len(context.conversation_history) >= 2:
-                    recent_queries = [h["user_query"] for h in context.conversation_history[-3:]]
-                    context.conversation_summary = f"Recent topics: {', '.join(context.recent_topics)}. Last queries: {'; '.join(recent_queries[-2:])}"
+                    recent_queries = [h.get("user_query", "") for h in context.conversation_history[-3:] if h.get("user_query")]
+                    follow_up_count = sum(1 for h in context.conversation_history if h.get("was_follow_up", False))
+                    
+                    context.conversation_summary = f"Recent topics: {', '.join(context.recent_topics)}. Last queries: {'; '.join(recent_queries[-2:])}. Follow-ups: {follow_up_count}"
                 
-                # Extract insights
-                if state.get("final_response"):
-                    response = state["final_response"]
-                    if "$" in response and any(word in response.lower() for word in ["spent", "budget", "total"]):
+                # Extract insights with enhanced follow-up context
+                final_response = state.get("final_response")
+                if final_response:
+                    if "$" in final_response and any(word in final_response.lower() for word in ["spent", "budget", "total"]):
                         import re
-                        amounts = re.findall(r'\$[\d,]+(?:\.\d{2})?', response)
+                        amounts = re.findall(r'\$[\d,]+(?:\.\d{2})?', final_response)
                         if amounts:
                             insight = f"Recent discussion: {amounts[0]} mentioned"
                             if insight not in context.key_insights:
                                 context.key_insights.append(insight)
+                    
+                    # Track cross-agent patterns
+                    follow_up_routing = state.get("follow_up_routing")
+                    if follow_up_routing and follow_up_routing.get("requires_agent_execution"):
+                        insight = f"Follow-up led to {agent_used} analysis"
+                        if insight not in context.key_insights:
+                            context.key_insights.append(insight)
 
                 context.key_insights = context.key_insights[-5:]
 
-                print(f"[DEBUG] 💾 Stored interaction: {context.last_user_query[:50]}... -> {len(state.get('final_response', ''))} chars")
+                print(f"[DEBUG] 💾 Stored interaction: {context.last_user_query[:50] if context.last_user_query else 'Unknown'}... -> {len(final_response) if final_response else 0} chars")
                 print(f"[DEBUG] 📚 Total conversation history: {len(context.conversation_history)} interactions")
+                
+                # Log follow-up pattern if detected
+                if state.get("is_follow_up"):
+                    follow_up_routing = state.get("follow_up_routing", {})
+                    if follow_up_routing and follow_up_routing.get("requires_agent_execution"):
+                        print(f"[DEBUG] 🔄 Follow-up pattern: {follow_up_routing.get('target_agent')} agent execution")
 
             state["execution_path"].append("memory_updater")
-            print("✅ Memory updated with query-response history")
+            print("✅ Memory updated with enhanced follow-up tracking")
 
         except Exception as e:
             print(f"❌ Memory update error: {e}")
+            # Log the error but don't fail the entire process
+            import traceback
+            traceback.print_exc()
 
         return state
-    
-
-    def _build_comprehensive_followup_context(self, context, current_query: str) -> str:
-        """Build comprehensive context for follow-up question handling"""
-        
-        context_parts = []
-        
-        # Current follow-up analysis
-        context_parts.append(f"""**CURRENT FOLLOW-UP ANALYSIS:**
-    - Follow-up question: "{current_query}"
-    - Follow-up type: {'Methodology question' if any(word in current_query.lower() for word in ['how', 'calculate', 'method']) else 'Detail request' if any(word in current_query.lower() for word in ['which', 'what', 'when', 'where']) else 'Clarification request'}
-    - Context dependency: HIGH (requires previous conversation context)""")
-
-        # Complete conversation reconstruction
-        if hasattr(context, 'conversation_history') and context.conversation_history:
-            context_parts.append(f"""**COMPLETE CONVERSATION HISTORY:**""")
-            
-            for i, conv in enumerate(context.conversation_history, 1):
-                if conv.get("user_query") and conv.get("agent_response"):
-                    agent_used = conv.get("agent_used", "unknown")
-                    success = conv.get("success", False)
-                    timestamp = conv.get("timestamp", "unknown")
-                    
-                    context_parts.append(f"""
-    **Interaction {i} [{agent_used.upper()} Agent] - {timestamp}:**
-    User Query: "{conv['user_query']}"
-    System Response: "{conv['agent_response']}"
-    Success: {success}
-    ---""")
-        
-        # Topic and insight analysis
-        context_parts.append(f"""**FINANCIAL DISCUSSION ANALYSIS:**
-    - Primary topics: {', '.join(context.recent_topics) if context.recent_topics else 'None'}
-    - Key insights shared: {', '.join(getattr(context, 'key_insights', [])) if hasattr(context, 'key_insights') and context.key_insights else 'None'}
-    - Last agent: {context.last_agent_used} (this agent handled the most recent financial analysis)
-    - Conversation depth: {len(context.conversation_history) if hasattr(context, 'conversation_history') else 0} total interactions""")
-
-        # Meta-conversation context
-        context_parts.append(f"""**META-CONVERSATION CONTEXT:**
-    - Session maturity: {'Advanced' if context.message_count > 3 else 'Intermediate' if context.message_count > 1 else 'New'}
-    - Context richness: {'Very High' if len(getattr(context, 'conversation_history', [])) > 2 else 'High' if len(getattr(context, 'conversation_history', [])) > 1 else 'Medium'}
-    - Financial engagement level: {'Deep discussion' if len(context.recent_topics) > 1 else 'Single topic focus' if context.recent_topics else 'Initial inquiry'}
-    - Conversation summary: {getattr(context, 'conversation_summary', 'Active financial discussion in progress')}""")
-
-        return "\n".join(context_parts)
 
     def _irrelevant_handler_node(self, state: MultiAgentState) -> MultiAgentState:
         """Handle irrelevant queries with natural responses"""
@@ -1087,8 +1254,7 @@ AVOID:
 BE NATURAL AND HELPFUL:
 - "That's outside my area, but I'm here to help with your finances!"
 - "I focus on helping with your money matters"
-- Give 2-3 specific examples of what you can do
-"""),
+- Give 2-3 specific examples of what you can do"""),
                 ("human", """The user asked: "{query}"
 
 Provide a brief, natural response that redirects them to finance topics.""")
@@ -1100,6 +1266,7 @@ Provide a brief, natural response that redirects them to finance topics.""")
             
             base_response = response.content
             
+            # Enhanced suggestions with follow-up context awareness
             suggestions = ""
             if context and context.recent_topics:
                 if "spending" in context.recent_topics:
@@ -1166,19 +1333,13 @@ Provide a brief, natural response that redirects them to finance topics.""")
             return "budget"
         elif primary_agent == "rag":
             return "rag"
-        elif primary_agent == "follow_up":  # ADD THIS LINE
+        elif primary_agent == "follow_up":
             return "follow_up"
         elif primary_agent == "irrelevant":
             return "irrelevant"
         else:
             state["error"] = f"Unknown agent: {primary_agent}"
             return "error"
-        
-
-
-    
-
-
 
     def chat(
         self,
@@ -1186,7 +1347,7 @@ Provide a brief, natural response that redirects them to finance topics.""")
         user_query: str,
         session_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Enhanced chat interface with RAG agent support"""
+        """Enhanced chat interface with smart follow-up capabilities"""
 
         if not session_id:
             session_id = f"session_{client_id}_{datetime.now().strftime('%Y%m%d_%H')}"
@@ -1196,6 +1357,7 @@ Provide a brief, natural response that redirects them to finance topics.""")
             user_query=user_query,
             conversation_context=None,
             routing_decision=None,
+            follow_up_routing=None,  # NEW: Enhanced follow-up routing
             primary_response=None,
             secondary_response=None,
             final_response="",
@@ -1221,6 +1383,18 @@ Provide a brief, natural response that redirects them to finance topics.""")
             if final_state.get("conversation_context"):
                 message_count = final_state["conversation_context"].message_count
 
+            # Enhanced response with follow-up metadata
+            follow_up_info = {}
+            if final_state.get("follow_up_routing"):
+                follow_up_routing = final_state["follow_up_routing"]
+                follow_up_info = {
+                    "was_follow_up": final_state.get("is_follow_up", False),
+                    "required_agent_execution": follow_up_routing.get("requires_agent_execution", False),
+                    "target_agent": follow_up_routing.get("target_agent"),
+                    "response_strategy": follow_up_routing.get("response_strategy"),
+                    "enhanced_query": final_state.get("enhanced_query")
+                }
+
             return {
                 "client_id": client_id,
                 "session_id": session_id,
@@ -1229,6 +1403,7 @@ Provide a brief, natural response that redirects them to finance topics.""")
                 "agent_used": agent_used,
                 "execution_path": final_state.get("execution_path", []),
                 "message_count": message_count,
+                "follow_up_info": follow_up_info,  # NEW: Enhanced follow-up information
                 "error": final_state.get("error"),
                 "timestamp": datetime.now().isoformat(),
                 "success": final_state.get("error") is None,
@@ -1249,13 +1424,22 @@ Provide a brief, natural response that redirects them to finance topics.""")
                 "success": False,
             }
         
-        
 
     def get_conversation_summary(self, session_id: str) -> Dict[str, Any]:
-        """Get conversation summary for a session"""
+        """Get conversation summary for a session with enhanced follow-up insights"""
         
         if session_id in self.contexts:
             context = self.contexts[session_id]
+            
+            # Enhanced analytics
+            follow_up_count = 0
+            agent_executions_from_followups = 0
+            
+            if hasattr(context, 'conversation_history'):
+                follow_up_count = sum(1 for h in context.conversation_history if h.get("was_follow_up", False))
+                agent_executions_from_followups = sum(1 for h in context.conversation_history 
+                                                    if h.get("was_follow_up", False) and h.get("follow_up_routing", {}).get("requires_agent_execution", False))
+            
             return {
                 "session_id": session_id,
                 "client_id": context.client_id,
@@ -1264,18 +1448,24 @@ Provide a brief, natural response that redirects them to finance topics.""")
                 "recent_topics": context.recent_topics,
                 "last_agent_used": context.last_agent_used,
                 "key_insights": context.key_insights,
-                "conversation_summary": context.conversation_summary
+                "conversation_summary": context.conversation_summary,
+                "enhanced_analytics": {  # NEW: Enhanced conversation analytics
+                    "follow_up_questions": follow_up_count,
+                    "agent_executions_from_followups": agent_executions_from_followups,
+                    "conversation_depth": "Deep" if context.message_count > 5 else "Medium" if context.message_count > 2 else "Surface",
+                    "cross_agent_pattern": len(set([h.get("agent_used") for h in getattr(context, 'conversation_history', []) if h.get("agent_used")])) > 1
+                }
             }
         else:
             return {"error": "Session not found"}
 
 
 def interactive_chat_demo():
-    """Enhanced interactive chat demo"""
+    """Enhanced interactive chat demo showcasing smart follow-up capabilities"""
     
     print("=" * 60)
-    print("💬 Enhanced Personal Finance Chat Demo - User ID: 430")
-    print("🔧 Type 'quit' to exit")
+    print("💬 ENHANCED Personal Finance Chat Demo with Smart Follow-ups")
+    print("🔧 User ID: 430 | Now supports cross-agent follow-up questions!")
     print("=" * 60)
 
     client_csv = "/Users/mohibalikhan/Desktop/banking-agent/banking_agent/Banking_Data.csv"
@@ -1295,9 +1485,11 @@ def interactive_chat_demo():
         print(f"Session ID: {session_id}")
         print("-" * 40)
 
-        # Test queries including RAG scenarios
+        # Enhanced test queries showcasing follow-up capabilities
         test_queries = [
-            "Hello"
+            "What are my spending patterns?",
+            "Based on that spending, create a budget for me",  # This should be a follow-up that executes budget agent
+            "Which categories were highest in my spending?",   # This should be conversational follow-up
         ]
 
         for i, query in enumerate(test_queries, 1):
@@ -1309,15 +1501,29 @@ def interactive_chat_demo():
                 session_id=session_id
             )
 
-            print(f"**{result['agent_used'].upper()}**: {result['response']}")
+            print(f"**{result['agent_used'].upper()}**: {result['response'][:200]}...")
             print(f"*Success: {result['success']}*")
+            
+            # Enhanced follow-up information
+            follow_up_info = result.get('follow_up_info', {})
+            if follow_up_info.get('was_follow_up'):
+                print(f"🔄 **Follow-up detected!**")
+                print(f"   - Agent execution required: {follow_up_info.get('required_agent_execution')}")
+                if follow_up_info.get('target_agent'):
+                    print(f"   - Target agent: {follow_up_info['target_agent']}")
+                if follow_up_info.get('enhanced_query'):
+                    print(f"   - Enhanced query: {follow_up_info['enhanced_query'][:60]}...")
             
             if result.get('error'):
                 print(f"❌ *Error: {result['error']}*")
             else:
                 print("✅ *Test passed!*")
 
-        print("\nNow you can continue the conversation...")
+        print("\nNow you can continue the conversation and test follow-up capabilities...")
+        print("Try questions like:")
+        print("• 'Based on my spending, what credit card suits me?'")
+        print("• 'Now create a budget from that analysis'")
+        print("• 'Which months did you use for that calculation?'")
         print("-" * 40)
 
         # Interactive mode
@@ -1349,6 +1555,18 @@ def interactive_chat_demo():
                 
                 print(f"\n{agent_emoji} **{agent_name}**: {result['response']}")
                 
+                # Enhanced follow-up information display
+                follow_up_info = result.get('follow_up_info', {})
+                if follow_up_info.get('was_follow_up'):
+                    print(f"\n🔄 **Follow-up Pattern Detected:**")
+                    print(f"   • Strategy: {follow_up_info.get('response_strategy', 'unknown')}")
+                    if follow_up_info.get('required_agent_execution'):
+                        print(f"   • Executed {follow_up_info.get('target_agent', 'unknown')} agent")
+                        if follow_up_info.get('enhanced_query'):
+                            print(f"   • Enhanced query: {follow_up_info['enhanced_query'][:50]}...")
+                    else:
+                        print(f"   • Provided conversational response")
+                
                 if result.get('execution_path'):
                     path_display = ' → '.join(result['execution_path'])
                     print(f"🛤️ *Execution Path: {path_display}*")
@@ -1363,6 +1581,19 @@ def interactive_chat_demo():
                 break
             except Exception as e:
                 print(f"❌ Error: {e}")
+
+        # Show enhanced conversation summary
+        print("\n" + "=" * 60)
+        print("📊 **ENHANCED CONVERSATION SUMMARY**")
+        summary = router.get_conversation_summary(session_id)
+        if summary.get('enhanced_analytics'):
+            analytics = summary['enhanced_analytics']
+            print(f"• Total messages: {summary.get('message_count', 0)}")
+            print(f"• Follow-up questions: {analytics.get('follow_up_questions', 0)}")
+            print(f"• Agent executions from follow-ups: {analytics.get('agent_executions_from_followups', 0)}")
+            print(f"• Conversation depth: {analytics.get('conversation_depth', 'Unknown')}")
+            print(f"• Cross-agent patterns: {'Yes' if analytics.get('cross_agent_pattern') else 'No'}")
+            print(f"• Topics covered: {', '.join(summary.get('recent_topics', []))}")
 
     except Exception as e:
         print(f"❌ Failed to initialize enhanced router: {e}")
